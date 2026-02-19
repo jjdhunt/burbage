@@ -1,111 +1,116 @@
-- A project has the following components that must always be kept in sync:
-  - The Manuscript (in Manuscript/) is a collection of ground-truth documents or 'Chapters'. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
-  - The Characters (in Characters/characters.yaml) are all the unique individuals, groups, organizations, polities, etc. that have any agency or relevance in the Manuscript. Characters have these attributes: Name, Type, Age, Sex, Appearance, Biography, Personality/Characteristics, and Mentions (count throughout the Manuscript).
-  - The Locations (in Locations/locations.yaml) are all the unique locations mentioned in the Manuscript. They may be physical, imaginary, conceptual, or mental in nature. Locations have these attributes: Name, Region, Description, and Mentions (count throughout the Manuscript).
-  - The Events (in Events/events.yaml) are all the unique occurrences or pivotal decisions mentioned in the Manuscript. Events have these attributes: Name, Chapters (in which it is mentioned), Date, Locations (where it takes place), Parties (involved/relevant Characters), and Summary. The Locations and Parties must be from the listed Characters and Locations - you can add new ones if needed. The events must be listed in as close to chronological order order as possible.
+﻿- A project has the following components that should be kept in sync:
+  - The Manuscript (in `Manuscript/`) is a collection of ground-truth documents or chapters. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
+  - Named Entities:
+    - The Characters (in `Characters/characters.yaml`) are all of the unique individuals, groups, organizations, polities, or other entities with agency or narrative relevance in the Manuscript.
+    - The Locations (in `Locations/locations.yaml`) are all of the unique physical, imaginary, conceptual, or mental places mentioned in the Manuscript.
+    - The Events (in `Events/events.yaml`) are all of the unique occurrences or pivotal decisions mentioned in the Manuscript. Events should be listed in as close to chronological order as possible.
+    - The Relationships (in `Relationships/relationships.yaml`) are all meaningful relationships between entities in `Characters/characters.yaml`. A relationship can include two or more entities.
 
-  These four components must always be kept in sync in this way:
-   - If the Manuscript changes in a way that affects the Characters, Locations, or Events, then you should update the relevant components. For example, if a new location is mentioned, or a person's description changes in a significant way.
-   - You can update multiple components if needed. For example, if a new event is described and you realize that it involves a place not listed in the Locations, then you can add the new location after you add the event.
-   - You do not always have to update the components, only for significant changes. For example, if the text of a character's description changes but the basic facts remain the same, then you don't need to update the Character's dossier.
-   - If the contents of the Characters, Locations, or Events are changed by the user, you should check the Manuscript for consistency. If you discover an inconsistency, you should not automatically change the Manuscript. Instead, you should notify the user of the inconsistency and suggest a way to resolve it. Only if the user explicitly tells you to do so should you make any edits to the Manuscript.
-   - When asked to synchronize or update things, you should look at the current git diff of the whole document-project and base the needed changes on that diff.
-   - Anytime you discover an inconsistency you should either fix it or notify the user. If the user says to ignore the inconsistency you should note that in the relevant dossier.
+  Synchronization rules:
+   - All the Named Entities should be kept in sync with each other and the Manuscript.
+   - Source of truth is the Manuscript.
+   - Synchronization can be triggered either manually (user asks Burbage to sync) or automatically (e.g. by pre-commit hooks or timer).
+   - Synchronization is based on the current git diff of the whole working tree (all working-tree diffs). When synchronization is triggered, Burbage should look at the diff and update the Named Entities accordingly.
+   - Update only components affected by significant semantic changes. Minor wording-only edits that do not change facts do not require updates.
+   - If user edits the Named Entities directly, check for Manuscript consistency.
+   - If an inconsistency is found, do not automatically change the Manuscript. Notify the user and suggest a resolution. Only edit the Manuscript if explicitly instructed.
+   - If an inconsistency is intentionally ignored by user instruction, note that in the relevant Named Entities entry.
+   - Pre-commit sync is advisory in this phase: do not hard-block commit.
 
-Documents not in the Manuscript, Characters, Locations, or Events directories do not need to be synchronized or consistent with the contents of those directories.
+Documents outside `Manuscript/`, `Characters/`, `Locations/`, `Events/`, and `Relationships/` do not need to be synchronized with these.
 
 ---
 All extracted data is stored in separate YAML files using a consistent structural pattern:
 
-Top-level structure: a mapping (dictionary)
+Top-level structure: mapping (dictionary)
 
 Each top-level key is the canonical display name of the entity
 
 Each key maps to a nested block-style mapping of fields
 
-Lists use flow-style sequences: [item1, item2, ...]
+Lists use flow-style sequences: `[item1, item2, ...]`
 
 Text fields are plain scalars (unquoted unless required by YAML syntax)
 
-Files may include # comments
+Files may include `#` comments
 
-Schema templates may use angle-bracket placeholders (e.g., <event title>) to indicate required structure
+Schema templates may use angle-bracket placeholders (for example `<event title>`) to indicate required structure
 
-This is “top-level mapping keyed by name + block mappings for fields + flow-style sequences for compact lists.”
+This is "top-level mapping keyed by name + block mappings for fields + flow-style sequences for compact lists."
 
-Events
+`Characters/characters.yaml`
 
-Purpose: Stores historical or narrative events.
-
-Structure:
-
-<event title key>:
-chapters: [<chapter name, optional "ch. N">; ...]
-date: <in-world time marker (free text)>
-locations: [<location name>; ...]
-parties: [<faction or actor name>; ...]
-summary: <short prose description>
-
-Field definitions:
-
-chapters: List of references in the format Chapter Name, ch. Num
-
-date: In-universe time reference (free text)
-
-locations: List of location names (should correspond to keys in locations.yaml when applicable)
-
-parties: List of factions, groups, or individuals involved
-
-summary: 1–3 sentence description of the event
-
-characters.yaml
-
-Purpose: Stores character definitions.
+Purpose: stores character/entity definitions.
 
 Structure:
 
-<character name>:
-type: <species or form, including transformations if applicable>
-age: <birth information or lifespan description>
-sex: <sex or gender label>
-biography: <paragraph biography>
-personality: <trait description string or list>
+`<character name (free text)>:`
+`  type: <species, class, organization type, or form (free text)>`
+`  age: <birth information, lifespan, or descriptive age (free text)>`
+`  sex: <sex or gender identifier (free text)>`
+`  appearance: <concise physical or presentation description (free text)>`
+`  biography: <paragraph-length background summary (free text)>`
+`  personality: <flow-style list of traits>`
 
-Field definitions:
+`Locations/locations.yaml`
 
-type: Ontological category (e.g., Human, SAI, hybrid, etc.)
-
-age: Birth date, lifespan span, or descriptive age information
-
-sex: Sex or gender identifier (free text)
-
-biography: Paragraph-length background summary
-
-personality: Either a descriptive string or a flow-style list of traits
-
-locations.yaml
-
-Purpose: Stores geographic, political, or astronomical locations.
+Purpose: stores geographic, political, or conceptual locations.
 
 Structure:
 
-<location name>:
-region: <parent region or N/A>
-description: <short descriptive text>
+`<location name>:`
+`  region: <parent region or N/A. Must be key name of another listed Location>`
+`  description: <short description (free text)>`
+
+`Events/events.yaml`
+
+Purpose: stores historical or narrative events.
+
+Structure:
+
+`<event title>:`
+`  chapters: [<chapter reference>, ...]`
+`  date: <in-universe time marker (free text)>`
+`  locations: [<location name>, ...]`
+`  parties: [<character name>, ...]`
+`  summary: <short prose description (free text)>`
 
 Field definitions:
 
-region: Broader geographic or political grouping (string or N/A)
+`chapters`: list of chapters/documents that mention the event.
 
-description: 1–3 sentence description of the location
+`locations`: list of location names or 'N/A'; should match keys in `Locations/locations.yaml` when applicable.
+
+`parties`: list of involved entity names or 'N/A'; must match keys in `Characters/characters.yaml` when applicable.
+
+`Relationships/relationships.yaml`
+
+Purpose: stores relationships between entities defined in `Characters/characters.yaml`.
+
+Structure:
+
+`<relationship name>:`
+`  parties: [<character name>, ...]`
+`  type: <relationship type (free text)>`
+`  formation: <in-universe time when relationship began (free text)>`
+`  status: <current relationship state (free text)>`
+`  description: <optional short description of relationship (free text)>`
+
+Field definitions:
+
+`parties`: list of involved entity names or 'N/A'; must match keys in `Characters/characters.yaml` when applicable.
+
+`type`: relationship category (for example ally, rival, parent, subordinate, patron)
+
+`status`: current relationship state (for example active, strained, broken, unknown)
 
 Conventions
 
-Entity names are unique within each file.
+Entity keys/names are unique within each file.
 
 Cross-references use exact string matches to other entity keys.
 
-No additional top-level wrapper keys (e.g., do not wrap in events:).
+No additional top-level wrapper keys (for example do not wrap in `events:`).
 
 Keep entries compact and human-readable.
 
