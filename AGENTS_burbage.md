@@ -1,0 +1,138 @@
+﻿# Project Overview
+
+- A project has the following components that should be kept in sync:
+  - The Manuscript (in `Manuscript/`) is a collection of ground-truth documents or chapters. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
+  - Named Entities:
+    - The Characters (in `Entities/characters.yaml`) are all of the unique individuals, groups, organizations, polities, or other entities with agency or narrative relevance in the Manuscript.
+    - The Locations (in `Entities/locations.yaml`) are all of the unique physical, imaginary, conceptual, or mental places mentioned in the Manuscript.
+    - The Events (in `Entities/events.yaml`) are all of the unique occurrences or pivotal decisions mentioned in the Manuscript. Events should be listed in as close to chronological order as possible.
+    - The Relationships (in `Entities/relationships.yaml`) are all meaningful relationships between entities in `Entities/characters.yaml`. A relationship can include two or more entities.
+
+# Project Synchronization Rules
+
+- All the Named Entities should be kept in sync with each other and the Manuscript.
+- Source of truth is the Manuscript.
+- Synchronization can be triggered either manually (user asks you to sync) or automatically (e.g. by a pre-commit hook).
+- Synchronization input is the current working-tree change set, defined as:
+  - tracked changes from `git diff --name-status HEAD -- Manuscript/ Entities/`
+  - untracked Manuscript files from `git ls-files --others --exclude-standard -- Manuscript/`
+  - Then take the union of all changed paths above and use that as the sync input.
+- Update only components affected by significant semantic changes. Minor wording-only edits that do not change facts do not require updates.
+- If the user edits the Named Entities directly, check for Manuscript consistency.
+- If an inconsistency is found, do not automatically change the Manuscript. Notify the user and suggest a resolution. Only edit the Manuscript if explicitly instructed.
+- If an inconsistency is intentionally ignored by user instruction, note that in the relevant Named Entities entry.
+- Pre-commit sync is advisory in this phase: do not hard-block commit.
+
+Documents outside the `Manuscript/` and `Entities/` dirs do not need to be synchronized with these.
+
+# Named Entity Schemas
+
+All extracted data is stored in separate YAML files in `Entities/` using a consistent structural pattern:
+- Use a "top-level mapping keyed by name + block mappings for fields + flow-style sequences for compact lists."
+- Top-level structure: mapping (dictionary)
+- Each top-level key is the canonical display name of the entity
+- Entity keys/names are unique within each file.
+- Each key maps to a nested block-style mapping of fields
+- Lists use flow-style sequences: `[item1, item2, ...]`
+- Text fields are plain scalars (unquoted unless required by YAML syntax)
+- Files should not include `#` comments
+- Schema templates below use angle-bracket placeholders (for example `<event title>`) to indicate required structure, not literal values.
+- Optional fields can be left empty (`null` or `[]`) if unknown.
+- Non-empty entity cross-references must exactly match entity keys.
+- No additional top-level wrapper keys (for example do not wrap in `events:`).
+- Avoid unnecessary quoting unless required by YAML syntax.
+- Keep entries compact and human-readable.
+- It is possible that the files may violate valid YAML syntax due to user manual editing. If you detect this, you should do your best to fix things.
+
+## characters.yaml
+
+Purpose: stores character/entity definitions.
+
+Structure:
+
+```yaml
+<character name>:
+  type: <species, class, organization type, or form>
+  age: <birth information, lifespan, or descriptive age>
+  sex: <sex or gender identifier>
+  appearance: <concise physical description>
+  biography: <paragraph-length background summary>
+  personality: [<trait>, ...]
+```
+
+Field definitions:
+
+- `type` (Required): species, class, organization type, or form.
+- `age` (Optional): birth information, lifespan, or descriptive age.
+- `sex` (Optional): sex or gender identifier.
+- `appearance` (Optional): concise physical description.
+- `biography` (Required): paragraph-length background summary.
+- `personality` (Optional): flow-style list of traits.
+
+## locations.yaml
+
+Purpose: stores geographic, political, or conceptual locations.
+
+Structure:
+
+```yaml
+<location name>:
+  region: <parent location name or `null`>
+  description: <short description>
+```
+
+Field definitions:
+
+- `region` (Optional): parent region/location key; if non-empty, must match another key in `locations.yaml`.
+- `description` (Required): short free-text description.
+
+## events.yaml
+
+Purpose: stores historical or narrative events.
+
+Structure:
+
+```yaml
+<event title>:
+  chapters: [<chapter reference>, ...]
+  date: <in-universe time marker or `null`>
+  locations: [<location name>, ...]
+  parties: [<character name>, ...]
+  summary: <short prose description>
+```
+
+Field definitions:
+
+- `chapters` (Required): list of chapters/documents that mention the event.
+- `date` (Optional): in-universe time marker.
+- `locations` (Optional): list of location keys; if non-empty, must match keys in `Entities/locations.yaml`.
+- `parties` (Optional): list of character/entity keys; if non-empty, must match keys in `Entities/characters.yaml`.
+- `summary` (Required): short prose description.
+
+## relationships.yaml
+
+Purpose: stores relationships between entities defined in `Entities/characters.yaml`.
+
+Structure:
+
+```yaml
+<relationship name>:
+  parties: [<character A name>, <character B name>, ...]
+  type: <relationship type>
+  formation: <in-universe time when relationship began or `null`>
+  status: <current relationship state>
+  description: <short description>
+```
+
+Field definitions:
+
+- `parties` (Required): list of two or more involved entity names; every entry must match keys in `Entities/characters.yaml`.
+- `type` (Required): relationship category (for example ally, rival, parent, subordinate, patron).
+- `formation` (Optional): in-universe time when the relationship began.
+- `status` (Required): current relationship state (for example active, strained, broken, unknown).
+- `description` (Required): short description.
+
+
+# Additional Instructions
+
+- When one or more documents are added to the Manuscript for the first time, there can be a lot of work to do. It is best to update the Entities in this order: Characters, Locations, Events, Relationships. As you progress through updating each, you might need to go back to update a previous Entity YAML (e.g. to add a missed Location where an Event takes place). You must read the entirety of each new Manuscript document. Proceed carefully; getting things right the first time will make it easy to update based on small diffs later. 
