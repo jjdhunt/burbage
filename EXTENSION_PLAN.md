@@ -182,3 +182,15 @@ Webview panels for corpus intelligence views:
 - Initial model/provider defaults for non-agentic character chat.
 - Final merge behavior for existing `.vscode/settings.json` (JSON patch strategy).
 - Pre-commit hook installation mechanism (`.git/hooks` direct vs `core.hooksPath`).
+
+## Status (2026-02-21)
+
+Done:
+- Extension scaffolded (TypeScript, commands, build/debug config).
+- `burbage.setup` implemented and tested locally.
+- Local packaging working (`burbage-0.0.1.vsix`) and install tested.
+
+Next:
+- Implement `burbage.sync` (change-set + entity sync engine).
+- Implement Codex-backed `burbage.openChat`.
+- Implement `burbage.openRelationshipDashboard`.

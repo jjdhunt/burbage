@@ -1,0 +1,62 @@
+{
+  "name": "burbage",
+  "displayName": "Burbage",
+  "description": "Entity synchronization assistant for structured text projects.",
+  "version": "0.0.1",
+  "publisher": "jack-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:burbage.setup",
+    "onCommand:burbage.sync",
+    "onCommand:burbage.openChat",
+    "onCommand:burbage.openRelationshipDashboard"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "burbage.setup",
+        "title": "Burbage: Setup Project"
+      },
+      {
+        "command": "burbage.sync",
+        "title": "Burbage: Sync Entities"
+      },
+      {
+        "command": "burbage.openChat",
+        "title": "Burbage: Open Chat"
+      },
+      {
+        "command": "burbage.openRelationshipDashboard",
+        "title": "Burbage: Open Relationship Dashboard"
+      }
+    ]
+  },
+  "scripts": {
+    "clean": "rimraf dist *.vsix",
+    "compile": "tsc -p ./",
+    "watch": "tsc --watch -p ./",
+    "prepackage": "npm run compile",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "files": [
+    "dist/**",
+    "README.md",
+    "LICENSE",
+    "AGENTS_burbage.md",
+    "settings_burbage.json"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.16.11",
+    "@types/vscode": "^1.109.0",
+    "@vscode/vsce": "^3.6.1",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.6.3"
+  }
+}
