@@ -5,7 +5,8 @@ Burbage is a VS Code extension for entity synchronization in structured text pro
 Current MVP commands:
 - `Burbage: Setup Project` (`burbage.setup`)
 - `Burbage: Sync Entities` (`burbage.sync`) - placeholder
-- `Burbage: Open Chat` (`burbage.openChat`) - placeholder
+- `Burbage: Open Chat` (`burbage.openChat`)
+- `Burbage: Login to Codex` (`burbage.loginCodex`)
 - `Burbage: Open Relationship Dashboard` (`burbage.openRelationshipDashboard`) - placeholder
 
 ## What `Burbage: Setup Project` does
@@ -30,6 +31,7 @@ Notes:
 - Setup always replaces `AGENTS.md`.
 - Setup always skips overwriting an existing `.vscode/settings.json`.
 - Local Codex installation requires `npm` to be available on the machine.
+- Setup verifies Codex login status and reports if login is required.
 
 ## Local development
 
@@ -60,3 +62,10 @@ This produces a `.vsix` in the project root.
 To install:
 - VS Code -> Command Palette -> `Extensions: Install from VSIX...`
 - Select the generated `.vsix`.
+
+## Codex login
+
+If setup reports login is required:
+- Run `Burbage: Login to Codex`.
+- Complete login in the opened terminal.
+- Then use `Burbage: Open Chat`.

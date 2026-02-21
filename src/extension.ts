@@ -5,6 +5,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
+type CommandResult = { stdout: string; stderr: string };
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
@@ -15,7 +16,10 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showInformationMessage("Burbage sync is not implemented yet.");
     }),
     vscode.commands.registerCommand("burbage.openChat", async () => {
-      vscode.window.showInformationMessage("Burbage chat is not implemented yet.");
+      await openChatPanel(context);
+    }),
+    vscode.commands.registerCommand("burbage.loginCodex", async () => {
+      await openCodexLoginTerminal();
     }),
     vscode.commands.registerCommand("burbage.openRelationshipDashboard", async () => {
       vscode.window.showInformationMessage("Relationship dashboard is not implemented yet.");
@@ -66,10 +70,286 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
 
   await ensureLocalCodexRuntime(workspaceRoot, summary);
   await ensureGitignoreEntry(workspaceRoot, ".burbage/runtime/", summary);
+  await ensureCodexLogin(workspaceRoot, summary);
 
   await vscode.window.showInformationMessage(
     "Burbage setup complete:\n" + summary.map((item) => `- ${item}`).join("\n")
   );
+}
+
+async function openChatPanel(context: vscode.ExtensionContext): Promise<void> {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage("Open a folder/workspace before opening Burbage chat.");
+    return;
+  }
+
+  const workspaceRoot = workspaceFolder.uri.fsPath;
+  const panel = vscode.window.createWebviewPanel(
+    "burbageChat",
+    "Burbage Chat",
+    vscode.ViewColumn.Beside,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+
+  panel.webview.html = getChatHtml();
+
+  let busy = false;
+  const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+    if (!isSendPromptMessage(message)) {
+      return;
+    }
+
+    if (busy) {
+      void panel.webview.postMessage({
+        type: "error",
+        text: "Burbage is still processing the previous message."
+      });
+      return;
+    }
+
+    const prompt = message.text.trim();
+    if (!prompt) {
+      return;
+    }
+
+    busy = true;
+    void panel.webview.postMessage({ type: "status", text: "Running Codex..." });
+
+    try {
+      const reply = await runCodexPrompt(prompt, workspaceRoot);
+      void panel.webview.postMessage({ type: "assistant", text: reply });
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      void panel.webview.postMessage({ type: "error", text: messageText });
+    } finally {
+      busy = false;
+      void panel.webview.postMessage({ type: "status", text: "" });
+    }
+  });
+
+  panel.onDidDispose(() => {
+    messageDisposable.dispose();
+  });
+
+  context.subscriptions.push(panel, messageDisposable);
+}
+
+function isSendPromptMessage(value: unknown): value is { type: "sendPrompt"; text: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const maybe = value as { type?: unknown; text?: unknown };
+  return maybe.type === "sendPrompt" && typeof maybe.text === "string";
+}
+
+function getChatHtml(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: var(--vscode-font-family); margin: 0; padding: 0; }
+    .root { display: grid; grid-template-rows: 1fr auto auto; height: 100vh; }
+    .transcript { padding: 12px; overflow-y: auto; }
+    .message { white-space: pre-wrap; margin: 0 0 10px 0; padding: 10px; border-radius: 6px; }
+    .message.user { background: var(--vscode-editor-inactiveSelectionBackground); }
+    .message.assistant { background: var(--vscode-sideBar-background); }
+    .message.error { background: var(--vscode-inputValidation-errorBackground); }
+    .composer { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 10px; border-top: 1px solid var(--vscode-panel-border); }
+    textarea { resize: vertical; min-height: 60px; max-height: 200px; font: inherit; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 8px; border-radius: 4px; }
+    button { font: inherit; padding: 0 14px; border-radius: 4px; border: 1px solid var(--vscode-button-border, transparent); background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .status { min-height: 20px; padding: 0 12px 10px 12px; color: var(--vscode-descriptionForeground); }
+  </style>
+</head>
+<body>
+  <div class="root">
+    <div id="transcript" class="transcript"></div>
+    <div class="composer">
+      <textarea id="prompt" placeholder="Ask Burbage..."></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div id="status" class="status"></div>
+  </div>
+  <script>
+    const vscode = acquireVsCodeApi();
+    const transcript = document.getElementById("transcript");
+    const promptEl = document.getElementById("prompt");
+    const sendBtn = document.getElementById("send");
+    const statusEl = document.getElementById("status");
+
+    function addMessage(kind, text) {
+      const el = document.createElement("div");
+      el.className = "message " + kind;
+      el.textContent = text;
+      transcript.appendChild(el);
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function send() {
+      const text = promptEl.value.trim();
+      if (!text) return;
+      addMessage("user", text);
+      promptEl.value = "";
+      vscode.postMessage({ type: "sendPrompt", text });
+    }
+
+    sendBtn.addEventListener("click", send);
+    promptEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        send();
+      }
+    });
+
+    window.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (msg.type === "assistant") addMessage("assistant", msg.text || "");
+      if (msg.type === "error") addMessage("error", msg.text || "Unknown error");
+      if (msg.type === "status") statusEl.textContent = msg.text || "";
+    });
+  </script>
+</body>
+</html>`;
+}
+
+async function runCodexPrompt(prompt: string, workspaceRoot: string): Promise<string> {
+  const codexCommand = await resolveCodexCommand(workspaceRoot);
+  if (!(await isCodexLoggedIn(codexCommand, workspaceRoot))) {
+    throw new Error("Codex is not logged in. Run 'Burbage: Login to Codex' first.");
+  }
+  const tmpDir = path.join(workspaceRoot, ".burbage", "tmp");
+  await fs.mkdir(tmpDir, { recursive: true });
+  const outputPath = path.join(tmpDir, `codex-last-${Date.now()}.txt`);
+
+  const args = [
+    "exec",
+    prompt,
+    "--skip-git-repo-check",
+    "--output-last-message",
+    outputPath,
+    "-C",
+    workspaceRoot
+  ];
+
+  let result: CommandResult;
+  try {
+    result = await execCommandCapture(codexCommand, args, workspaceRoot);
+  } catch (error) {
+    throw new Error(formatExecError("Codex command failed.", error));
+  }
+
+  let lastMessage = "";
+  try {
+    lastMessage = (await fs.readFile(outputPath, "utf8")).trim();
+  } catch {
+    // If output file was not written, we fall back to stdout/stderr.
+  } finally {
+    void fs.unlink(outputPath).catch(() => {
+      // Best effort cleanup.
+    });
+  }
+
+  if (lastMessage) {
+    return lastMessage;
+  }
+  if (result.stdout.trim()) {
+    return result.stdout.trim();
+  }
+  if (result.stderr.trim()) {
+    return result.stderr.trim();
+  }
+  return "Codex returned no response text.";
+}
+
+async function resolveCodexCommand(workspaceRoot: string): Promise<string> {
+  const workspaceUri = vscode.Uri.file(workspaceRoot);
+  const settings = vscode.workspace.getConfiguration(undefined, workspaceUri);
+  const configuredPath = settings.get<string>("burbage.codexCliPath");
+
+  const candidates: string[] = [];
+  if (configuredPath) {
+    candidates.push(path.isAbsolute(configuredPath) ? configuredPath : path.join(workspaceRoot, configuredPath));
+  }
+  candidates.push(getLocalCodexCliPath(path.join(workspaceRoot, ".burbage", "runtime")));
+  candidates.push(process.platform === "win32" ? "codex.cmd" : "codex");
+
+  for (const candidate of Array.from(new Set(candidates))) {
+    if (await isUsableCodexCli(candidate, workspaceRoot)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    "Codex CLI not found. Run 'Burbage: Setup Project' to install local Codex, then sign in using 'codex login'."
+  );
+}
+
+async function ensureCodexLogin(workspaceRoot: string, summary: string[]): Promise<void> {
+  try {
+    const codexCommand = await resolveCodexCommand(workspaceRoot);
+    const loggedIn = await isCodexLoggedIn(codexCommand, workspaceRoot);
+    if (loggedIn) {
+      summary.push("Codex login verified");
+      return;
+    }
+    summary.push("Codex login required (run Burbage: Login to Codex)");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    summary.push(`Could not verify Codex login (${message})`);
+  }
+}
+
+async function isCodexLoggedIn(codexCommand: string, cwd: string): Promise<boolean> {
+  try {
+    const result = await execCommandCapture(codexCommand, ["login", "status"], cwd);
+    const combined = `${result.stdout}\n${result.stderr}`.toLowerCase();
+    return combined.includes("logged in");
+  } catch {
+    return false;
+  }
+}
+
+async function openCodexLoginTerminal(): Promise<void> {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage("Open a folder/workspace before starting Codex login.");
+    return;
+  }
+
+  const workspaceRoot = workspaceFolder.uri.fsPath;
+  try {
+    const codexCommand = await resolveCodexCommand(workspaceRoot);
+    const terminal = vscode.window.createTerminal({
+      name: "Burbage Codex Login",
+      cwd: workspaceRoot
+    });
+    terminal.show(true);
+    terminal.sendText(buildTerminalCommand(codexCommand, ["login"]), true);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(message);
+  }
+}
+
+function formatExecError(prefix: string, error: unknown): string {
+  if (typeof error !== "object" || error === null) {
+    return `${prefix} ${String(error)}`;
+  }
+
+  const maybe = error as { message?: unknown; stdout?: unknown; stderr?: unknown };
+  const parts = [prefix];
+  if (typeof maybe.message === "string" && maybe.message.trim()) {
+    parts.push(maybe.message.trim());
+  }
+  if (typeof maybe.stderr === "string" && maybe.stderr.trim()) {
+    parts.push(`stderr: ${maybe.stderr.trim()}`);
+  }
+  if (typeof maybe.stdout === "string" && maybe.stdout.trim()) {
+    parts.push(`stdout: ${maybe.stdout.trim()}`);
+  }
+  return parts.join(" ");
 }
 
 async function ensureDirectory(dirPath: string, summary: string[], workspaceRoot: string): Promise<void> {
@@ -237,18 +517,29 @@ async function runNpmViaLoginShell(args: string[], cwd: string): Promise<void> {
 }
 
 async function execCommand(command: string, args: string[], cwd: string): Promise<void> {
+  await execCommandCapture(command, args, cwd);
+}
+
+async function execCommandCapture(command: string, args: string[], cwd: string): Promise<CommandResult> {
   if (process.platform === "win32" && isCmdScript(command)) {
     const powershell = await resolvePowerShellExecutable();
     const script = buildPowerShellInvocation(command, args);
-    await execFile(
+    const result = await execFile(
       powershell,
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
       { cwd }
     );
-    return;
+    return {
+      stdout: asText(result.stdout),
+      stderr: asText(result.stderr)
+    };
   }
 
-  await execFile(command, args, { cwd });
+  const result = await execFile(command, args, { cwd });
+  return {
+    stdout: asText(result.stdout),
+    stderr: asText(result.stderr)
+  };
 }
 
 async function resolvePowerShellExecutable(): Promise<string> {
@@ -285,6 +576,25 @@ function buildPowerShellInvocation(command: string, args: string[]): string {
 
 function quoteForPosixShell(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function buildTerminalCommand(command: string, args: string[]): string {
+  if (process.platform === "win32") {
+    if (command.includes("\\") || command.includes("/") || command.includes(" ")) {
+      const escaped = command.replace(/'/g, "''");
+      return `& '${escaped}' ${args.join(" ")}`.trim();
+    }
+    return [command, ...args].join(" ");
+  }
+
+  const quoted = command.includes("/") || command.includes(" ")
+    ? quoteForPosixShell(command)
+    : command;
+  return [quoted, ...args.map((arg) => quoteForPosixShell(arg))].join(" ");
+}
+
+function asText(value: string | Buffer): string {
+  return typeof value === "string" ? value : value.toString("utf8");
 }
 
 function getNpmCandidates(): string[] {
@@ -338,11 +648,17 @@ function getLocalCodexCliPath(runtimeDir: string): string {
 }
 
 async function isUsableCodexCli(commandPath: string, cwd: string): Promise<boolean> {
+  const isExplicitPath = commandPath.includes(path.sep) || path.isAbsolute(commandPath);
   try {
-    await fs.access(commandPath);
+    if (isExplicitPath) {
+      await fs.access(commandPath);
+    }
     await execCommand(commandPath, ["--version"], cwd);
     return true;
   } catch {
+    if (!isExplicitPath) {
+      return false;
+    }
     // Fallback: if the wrapper command fails, check package presence to avoid false negatives.
     const runtimeDir = path.dirname(path.dirname(path.dirname(commandPath)));
     const packagePath = path.join(runtimeDir, "node_modules", "@openai", "codex", "package.json");

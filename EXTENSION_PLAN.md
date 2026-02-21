@@ -191,8 +191,9 @@ Done:
 - `burbage.setup` implemented and tested locally.
 - Local `.vsix` packaging/install tested.
 - Local Codex runtime install integrated into setup (`.burbage/runtime`) with platform-specific npm resolution.
+- `burbage.openChat` implemented as a simple webview chat dialog backed by Codex CLI (`codex exec`).
+- `burbage.loginCodex` command added and setup now checks Codex login status.
 
 Next:
 - Implement `burbage.sync` (change-set + entity sync engine).
-- Implement Codex-backed `burbage.openChat`.
 - Implement `burbage.openRelationshipDashboard`.
