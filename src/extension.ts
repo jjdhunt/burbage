@@ -6,8 +6,6 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
 
-type FileAction = "skip" | "replace" | "merge";
-
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("burbage.setup", async () => {
@@ -39,54 +37,64 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
   const workspaceRoot = workspaceFolder.uri.fsPath;
   const summary: string[] = [];
 
-  await ensureDirectory(path.join(workspaceRoot, "Manuscript"), summary);
-  await ensureDirectory(path.join(workspaceRoot, "Entities"), summary);
-  await ensureDirectory(path.join(workspaceRoot, ".vscode"), summary);
+  await ensureDirectory(path.join(workspaceRoot, "Manuscript"), summary, workspaceRoot);
+  await ensureDirectory(path.join(workspaceRoot, "Entities"), summary, workspaceRoot);
+  await ensureDirectory(path.join(workspaceRoot, ".vscode"), summary, workspaceRoot);
 
-  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "characters.yaml"), "{}\n", summary);
-  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "locations.yaml"), "{}\n", summary);
-  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "events.yaml"), "{}\n", summary);
-  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "relationships.yaml"), "{}\n", summary);
+  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "characters.yaml"), "{}\n", summary, workspaceRoot);
+  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "locations.yaml"), "{}\n", summary, workspaceRoot);
+  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "events.yaml"), "{}\n", summary, workspaceRoot);
+  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "relationships.yaml"), "{}\n", summary, workspaceRoot);
 
   await ensureGitRepo(workspaceRoot, summary);
 
-  await copyTemplateWithPrompt({
+  await copyTemplateWithPolicy({
     templatePath: path.join(context.extensionPath, "AGENTS_burbage.md"),
     destinationPath: path.join(workspaceRoot, "AGENTS.md"),
     summary,
-    mergeMode: "append"
+    existingPolicy: "replace",
+    workspaceRoot
   });
 
-  await copyTemplateWithPrompt({
+  await copyTemplateWithPolicy({
     templatePath: path.join(context.extensionPath, "settings_burbage.json"),
     destinationPath: path.join(workspaceRoot, ".vscode", "settings.json"),
     summary,
-    mergeMode: "json-defaults"
+    existingPolicy: "skip",
+    workspaceRoot
   });
+
+  await ensureLocalCodexRuntime(workspaceRoot, summary);
+  await ensureGitignoreEntry(workspaceRoot, ".burbage/runtime/", summary);
 
   await vscode.window.showInformationMessage(
     "Burbage setup complete:\n" + summary.map((item) => `- ${item}`).join("\n")
   );
 }
 
-async function ensureDirectory(dirPath: string, summary: string[]): Promise<void> {
+async function ensureDirectory(dirPath: string, summary: string[], workspaceRoot: string): Promise<void> {
   if (await pathExists(dirPath)) {
-    summary.push(`${relativeToCwd(dirPath)} already exists`);
+    summary.push(`${relativeToWorkspace(dirPath, workspaceRoot)} already exists`);
     return;
   }
 
   await fs.mkdir(dirPath, { recursive: true });
-  summary.push(`Created ${relativeToCwd(dirPath)}`);
+  summary.push(`Created ${relativeToWorkspace(dirPath, workspaceRoot)}`);
 }
 
-async function ensureFileIfMissing(filePath: string, contents: string, summary: string[]): Promise<void> {
+async function ensureFileIfMissing(
+  filePath: string,
+  contents: string,
+  summary: string[],
+  workspaceRoot: string
+): Promise<void> {
   if (await pathExists(filePath)) {
-    summary.push(`${relativeToCwd(filePath)} already exists`);
+    summary.push(`${relativeToWorkspace(filePath, workspaceRoot)} already exists`);
     return;
   }
 
   await fs.writeFile(filePath, contents, "utf8");
-  summary.push(`Created ${relativeToCwd(filePath)}`);
+  summary.push(`Created ${relativeToWorkspace(filePath, workspaceRoot)}`);
 }
 
 async function ensureGitRepo(workspaceRoot: string, summary: string[]): Promise<void> {
@@ -105,16 +113,295 @@ async function ensureGitRepo(workspaceRoot: string, summary: string[]): Promise<
   }
 }
 
-async function copyTemplateWithPrompt(options: {
+async function ensureGitignoreEntry(workspaceRoot: string, entry: string, summary: string[]): Promise<void> {
+  const gitignorePath = path.join(workspaceRoot, ".gitignore");
+  const normalizedEntry = entry.trim();
+
+  if (!(await pathExists(gitignorePath))) {
+    await fs.writeFile(gitignorePath, `${normalizedEntry}\n`, "utf8");
+    summary.push(`Created .gitignore with ${normalizedEntry}`);
+    return;
+  }
+
+  const existing = await fs.readFile(gitignorePath, "utf8");
+  const lines = existing.split(/\r?\n/).map((line) => line.trim());
+  if (lines.includes(normalizedEntry)) {
+    summary.push(`.gitignore already contains ${normalizedEntry}`);
+    return;
+  }
+
+  const next = `${existing.trimEnd()}\n${normalizedEntry}\n`;
+  await fs.writeFile(gitignorePath, next, "utf8");
+  summary.push(`Added ${normalizedEntry} to .gitignore`);
+}
+
+async function ensureLocalCodexRuntime(workspaceRoot: string, summary: string[]): Promise<void> {
+  const runtimeDir = path.join(workspaceRoot, ".burbage", "runtime");
+  const localCodexPath = getLocalCodexCliPath(runtimeDir);
+
+  if (await isUsableCodexCli(localCodexPath, workspaceRoot)) {
+    summary.push("Local Codex CLI already installed");
+    await setCodexSettings(workspaceRoot, runtimeDir, summary);
+    return;
+  }
+
+  try {
+    await fs.mkdir(runtimeDir, { recursive: true });
+    const runtimePackageJsonPath = path.join(runtimeDir, "package.json");
+    if (!(await pathExists(runtimePackageJsonPath))) {
+      const runtimePackageJson = {
+        name: "burbage-runtime",
+        private: true
+      };
+      await fs.writeFile(runtimePackageJsonPath, `${JSON.stringify(runtimePackageJson, null, 2)}\n`, "utf8");
+    }
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Burbage setup: installing local Codex CLI",
+        cancellable: false
+      },
+      async () => {
+        await runNpm(["install", "--prefix", runtimeDir, "--no-save", "@openai/codex"], workspaceRoot);
+      }
+    );
+
+    if (!(await isUsableCodexCli(localCodexPath, workspaceRoot))) {
+      summary.push("Failed to verify local Codex CLI after install");
+      return;
+    }
+
+    summary.push("Installed Codex CLI locally at .burbage/runtime");
+    await setCodexSettings(workspaceRoot, runtimeDir, summary);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    summary.push(`Could not install local Codex CLI (${message})`);
+  }
+}
+
+async function runNpm(args: string[], cwd: string): Promise<void> {
+  const candidates = getNpmCandidates();
+  let lastError: unknown;
+
+  for (const command of candidates) {
+    try {
+      await execCommand(command, args, cwd);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (isCommandNotFoundError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (process.platform !== "win32") {
+    try {
+      await runNpmViaLoginShell(args, cwd);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const candidateList = candidates.join(", ");
+  const original = lastError instanceof Error ? ` Original error: ${lastError.message}` : "";
+  throw new Error(
+    `npm executable not found. Checked: ${candidateList}. Ensure Node.js/npm is installed and restart VS Code.${original}`
+  );
+}
+
+async function runNpmViaLoginShell(args: string[], cwd: string): Promise<void> {
+  const shellCandidates = ["/bin/zsh", "/bin/bash", "/bin/sh"];
+  const command = ["npm", ...args].map(quoteForPosixShell).join(" ");
+  let lastError: unknown;
+
+  for (const shellPath of shellCandidates) {
+    if (!(await pathExists(shellPath))) {
+      continue;
+    }
+    try {
+      await execFile(shellPath, ["-lc", command], { cwd });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  throw new Error("No usable POSIX shell found to resolve npm.");
+}
+
+async function execCommand(command: string, args: string[], cwd: string): Promise<void> {
+  if (process.platform === "win32" && isCmdScript(command)) {
+    const powershell = await resolvePowerShellExecutable();
+    const script = buildPowerShellInvocation(command, args);
+    await execFile(
+      powershell,
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { cwd }
+    );
+    return;
+  }
+
+  await execFile(command, args, { cwd });
+}
+
+async function resolvePowerShellExecutable(): Promise<string> {
+  const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  const candidates = [
+    path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    path.join(systemRoot, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    "powershell.exe"
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate.toLowerCase().endsWith(".exe")) {
+      if (await pathExists(candidate)) {
+        return candidate;
+      }
+      continue;
+    }
+    return candidate;
+  }
+
+  return "powershell.exe";
+}
+
+function isCmdScript(command: string): boolean {
+  const lower = command.toLowerCase();
+  return lower.endsWith(".cmd") || lower.endsWith(".bat");
+}
+
+function buildPowerShellInvocation(command: string, args: string[]): string {
+  const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  const joinedArgs = args.map((arg) => quote(arg)).join(" ");
+  return `& ${quote(command)} ${joinedArgs}`.trim();
+}
+
+function quoteForPosixShell(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function getNpmCandidates(): string[] {
+  const candidates: string[] = [];
+  if (process.platform === "win32") {
+    candidates.push("npm.cmd", "npm");
+
+    candidates.push(
+      "C:\\Program Files\\nodejs\\npm.cmd",
+      "C:\\Program Files (x86)\\nodejs\\npm.cmd"
+    );
+
+    const programFiles = process.env.ProgramFiles;
+    if (programFiles) {
+      candidates.push(path.join(programFiles, "nodejs", "npm.cmd"));
+    }
+
+    const programFilesX86 = process.env["ProgramFiles(x86)"];
+    if (programFilesX86) {
+      candidates.push(path.join(programFilesX86, "nodejs", "npm.cmd"));
+    }
+
+    const appData = process.env.APPDATA;
+    if (appData) {
+      candidates.push(path.join(appData, "npm", "npm.cmd"));
+    }
+  } else {
+    candidates.push("npm", "/opt/homebrew/bin/npm", "/usr/local/bin/npm", "/usr/bin/npm");
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function isCommandNotFoundError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  const message = (error as { message?: unknown }).message;
+  const msg = typeof message === "string" ? message.toLowerCase() : "";
+  return (
+    code === "ENOENT" ||
+    msg.includes("not recognized as an internal or external command") ||
+    msg.includes("command not found")
+  );
+}
+
+function getLocalCodexCliPath(runtimeDir: string): string {
+  const exeName = process.platform === "win32" ? "codex.cmd" : "codex";
+  return path.join(runtimeDir, "node_modules", ".bin", exeName);
+}
+
+async function isUsableCodexCli(commandPath: string, cwd: string): Promise<boolean> {
+  try {
+    await fs.access(commandPath);
+    await execCommand(commandPath, ["--version"], cwd);
+    return true;
+  } catch {
+    // Fallback: if the wrapper command fails, check package presence to avoid false negatives.
+    const runtimeDir = path.dirname(path.dirname(path.dirname(commandPath)));
+    const packagePath = path.join(runtimeDir, "node_modules", "@openai", "codex", "package.json");
+    return pathExists(packagePath);
+  }
+}
+
+async function setCodexSettings(workspaceRoot: string, runtimeDir: string, summary: string[]): Promise<void> {
+  const settingsPath = path.join(workspaceRoot, ".vscode", "settings.json");
+  if (!(await pathExists(settingsPath))) {
+    summary.push("Could not set Codex settings (.vscode/settings.json missing)");
+    return;
+  }
+
+  const localCodexPath = getLocalCodexCliPath(runtimeDir);
+  const codexPathRelative = path
+    .relative(workspaceRoot, localCodexPath)
+    .split(path.sep)
+    .join("/");
+
+  const raw = await fs.readFile(settingsPath, "utf8");
+  let settings: Record<string, unknown>;
+  try {
+    settings = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    summary.push("Could not set Codex settings (invalid JSON in .vscode/settings.json)");
+    return;
+  }
+
+  let changed = false;
+  if (settings["burbage.codexCliPath"] !== codexPathRelative) {
+    settings["burbage.codexCliPath"] = codexPathRelative;
+    changed = true;
+  }
+  if (settings["burbage.codexCliMode"] !== "local") {
+    settings["burbage.codexCliMode"] = "local";
+    changed = true;
+  }
+
+  if (!changed) {
+    summary.push("Codex runtime settings already configured");
+    return;
+  }
+
+  await fs.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  summary.push("Configured workspace to use local Codex CLI");
+}
+
+async function copyTemplateWithPolicy(options: {
   templatePath: string;
   destinationPath: string;
   summary: string[];
-  mergeMode: "append" | "json-defaults";
+  existingPolicy: "skip" | "replace";
+  workspaceRoot: string;
 }): Promise<void> {
-  const { templatePath, destinationPath, summary, mergeMode } = options;
+  const { templatePath, destinationPath, summary, existingPolicy, workspaceRoot } = options;
 
   if (!(await pathExists(templatePath))) {
-    summary.push(`Template missing: ${relativeToCwd(templatePath)}`);
+    summary.push(`Template missing: ${path.basename(templatePath)}`);
     return;
   }
 
@@ -122,88 +409,17 @@ async function copyTemplateWithPrompt(options: {
 
   if (!(await pathExists(destinationPath))) {
     await fs.writeFile(destinationPath, templateContent, "utf8");
-    summary.push(`Created ${relativeToCwd(destinationPath)} from template`);
+    summary.push(`Created ${relativeToWorkspace(destinationPath, workspaceRoot)} from template`);
     return;
   }
 
-  const action = await promptFileAction(destinationPath);
-  if (!action || action === "skip") {
-    summary.push(`Skipped existing ${relativeToCwd(destinationPath)}`);
+  if (existingPolicy === "skip") {
+    summary.push(`Skipped existing ${relativeToWorkspace(destinationPath, workspaceRoot)}`);
     return;
   }
 
-  if (action === "replace") {
-    await fs.writeFile(destinationPath, templateContent, "utf8");
-    summary.push(`Replaced ${relativeToCwd(destinationPath)} from template`);
-    return;
-  }
-
-  if (mergeMode === "append") {
-    const existing = await fs.readFile(destinationPath, "utf8");
-    if (existing.includes(templateContent.trim())) {
-      summary.push(`${relativeToCwd(destinationPath)} already contains template content`);
-      return;
-    }
-
-    const merged = `${existing.trimEnd()}\n\n---\n\n${templateContent.trim()}\n`;
-    await fs.writeFile(destinationPath, merged, "utf8");
-    summary.push(`Merged template into ${relativeToCwd(destinationPath)} (append mode)`);
-    return;
-  }
-
-  const existingSettingsRaw = await fs.readFile(destinationPath, "utf8");
-  const mergedJson = mergeJsonDefaults(templateContent, existingSettingsRaw);
-  if (!mergedJson) {
-    summary.push(`Could not merge ${relativeToCwd(destinationPath)} (invalid JSON)`);
-    return;
-  }
-
-  await fs.writeFile(destinationPath, `${JSON.stringify(mergedJson, null, 2)}\n`, "utf8");
-  summary.push(`Merged template into ${relativeToCwd(destinationPath)} (json defaults mode)`);
-}
-
-function mergeJsonDefaults(templateRaw: string, existingRaw: string): Record<string, unknown> | undefined {
-  try {
-    const template = JSON.parse(templateRaw) as Record<string, unknown>;
-    const existing = JSON.parse(existingRaw) as Record<string, unknown>;
-    return deepMerge(template, existing) as Record<string, unknown>;
-  } catch {
-    return undefined;
-  }
-}
-
-function deepMerge(base: unknown, override: unknown): unknown {
-  if (!isPlainObject(base) || !isPlainObject(override)) {
-    return override;
-  }
-
-  const result: Record<string, unknown> = { ...base };
-  for (const [key, overrideValue] of Object.entries(override)) {
-    const baseValue = result[key];
-    result[key] = deepMerge(baseValue, overrideValue);
-  }
-  return result;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function promptFileAction(destinationPath: string): Promise<FileAction | undefined> {
-  const selected = await vscode.window.showQuickPick(
-    [
-      { label: "Skip", description: "Keep existing file", action: "skip" as const },
-      { label: "Merge", description: "Merge template into existing file", action: "merge" as const },
-      { label: "Replace", description: "Overwrite existing file with template", action: "replace" as const }
-    ],
-    {
-      title: "Burbage Setup",
-      placeHolder: `${relativeToCwd(destinationPath)} already exists`,
-      ignoreFocusOut: true
-    }
-  );
-
-  return selected?.action;
+  await fs.writeFile(destinationPath, templateContent, "utf8");
+  summary.push(`Replaced ${relativeToWorkspace(destinationPath, workspaceRoot)} from template`);
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -215,6 +431,13 @@ async function pathExists(targetPath: string): Promise<boolean> {
   }
 }
 
-function relativeToCwd(targetPath: string): string {
-  return path.relative(process.cwd(), targetPath) || targetPath;
+function relativeToWorkspace(targetPath: string, workspaceRoot: string): string {
+  const relative = path.relative(workspaceRoot, targetPath);
+  if (!relative) {
+    return ".";
+  }
+  if (relative.startsWith("..")) {
+    return path.basename(targetPath);
+  }
+  return relative;
 }

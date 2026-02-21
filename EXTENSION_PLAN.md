@@ -32,7 +32,8 @@ One setup command initializes a project in an additive, non-destructive way:
 
 Behavior constraints:
 - Never overwrite existing files silently.
-- If `AGENTS.md` or `.vscode/settings.json` exists, prompt for merge/replace/skip.
+- Always replace `AGENTS.md` from template.
+- Never overwrite existing `.vscode/settings.json`.
 
 ### 2. Agentic Chat
 
@@ -188,7 +189,8 @@ Webview panels for corpus intelligence views:
 Done:
 - Extension scaffolded (TypeScript, commands, build/debug config).
 - `burbage.setup` implemented and tested locally.
-- Local packaging working (`burbage-0.0.1.vsix`) and install tested.
+- Local `.vsix` packaging/install tested.
+- Local Codex runtime install integrated into setup (`.burbage/runtime`) with platform-specific npm resolution.
 
 Next:
 - Implement `burbage.sync` (change-set + entity sync engine).

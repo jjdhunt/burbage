@@ -19,13 +19,17 @@ It performs additive, non-destructive setup in the current workspace:
   - `Entities/events.yaml`
   - `Entities/relationships.yaml`
 - Initializes git repository if missing.
-- Creates `AGENTS.md` from `AGENTS_burbage.md` if missing.
-- Creates `.vscode/settings.json` from `settings_burbage.json` if missing.
+- Creates or replaces `AGENTS.md` from `AGENTS_burbage.md`.
+- Creates `.vscode/settings.json` from `settings_burbage.json` if missing (does not overwrite existing settings).
+- Ensures Codex CLI is installed locally in `.burbage/runtime` (workspace-local, not global).
+- Writes workspace settings to use local Codex CLI:
+  - `burbage.codexCliMode = "local"`
+  - `burbage.codexCliPath = ".burbage/runtime/node_modules/.bin/codex(.cmd on Windows)"`
 
-If `AGENTS.md` or `.vscode/settings.json` already exists, setup prompts for:
-- `Skip`
-- `Merge`
-- `Replace`
+Notes:
+- Setup always replaces `AGENTS.md`.
+- Setup always skips overwriting an existing `.vscode/settings.json`.
+- Local Codex installation requires `npm` to be available on the machine.
 
 ## Local development
 
