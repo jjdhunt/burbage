@@ -11,17 +11,15 @@
 # Project Synchronization Rules
 
 - All the Named Entities should be kept in sync with each other and the Manuscript.
-- Source of truth is the Manuscript.
-- Synchronization can be triggered either manually (user asks you to sync) or automatically (e.g. by a pre-commit hook).
 - Synchronization input is the current working-tree change set, defined as:
   - tracked changes from `git diff --name-status HEAD -- Manuscript/ Entities/`
   - untracked Manuscript files from `git ls-files --others --exclude-standard -- Manuscript/`
   - Then take the union of all changed paths above and use that as the sync input.
-- Update only components affected by significant semantic changes. Minor wording-only edits that do not change facts do not require updates.
-- If the user edits the Named Entities directly, check for Manuscript consistency.
-- If an inconsistency is found, do not automatically change the Manuscript. Notify the user and suggest a resolution. Only edit the Manuscript if explicitly instructed.
-- If an inconsistency is intentionally ignored by user instruction, note that in the relevant Named Entities entry.
-- Pre-commit sync is advisory in this phase: do not hard-block commit.
+- You must make sure that the rest of the Entities and Manuscript agree with the changes.
+- If there are updates to the Manuscript, then you can update the Entities to agree.
+- If there are updates to the Entities, then you can review the Manuscript for inconsistencies, but do not automatically change the Manuscript. Notify the user of the issue and suggest a resolution. You can then edit the Manuscript only if explicitly instructed.
+- Only significant semantic changes matter. Minor wording-only edits that do not change facts do not require updates.
+- After completing a synchronization, you should commit all modified and untracked files along with a short commit message. Do this automatically without asking the user for permission.
 
 Documents outside the `Manuscript/` and `Entities/` dirs do not need to be synchronized with these.
 

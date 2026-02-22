@@ -4,7 +4,7 @@ Burbage is a VS Code extension for entity synchronization in structured text pro
 
 Current MVP commands:
 - `Burbage: Setup Project` (`burbage.setup`)
-- `Burbage: Sync Entities` (`burbage.sync`) - placeholder
+- `Burbage: Sync Entities` (`burbage.sync`) - sends a sync request into Burbage chat
 - `Burbage: Open Chat` (`burbage.openChat`)
 - `Burbage: Login to Codex` (`burbage.loginCodex`)
 - `Burbage: Open Relationship Dashboard` (`burbage.openRelationshipDashboard`) - placeholder
@@ -69,3 +69,10 @@ If setup reports login is required:
 - Run `Burbage: Login to Codex`.
 - Complete login in the opened terminal.
 - Then use `Burbage: Open Chat`.
+
+## Chat behavior
+
+- Chat lives in the Burbage activity bar sidebar.
+- Chat uses a persistent Codex thread per open sidebar session (`exec` then `exec resume`).
+- Sidebar includes a `Sync` button that sends a synchronization request prompt to Burbage.
+- Chat currently runs Codex with `--dangerously-bypass-approvals-and-sandbox` to allow file edits across the project workspace.

@@ -6,17 +6,24 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
 type CommandResult = { stdout: string; stderr: string };
+const DEFAULT_SYNC_PROMPT =
+  "Synchronize the project entities with the Manuscript. Go ahead and apply needed file updates directly.";
 
 export function activate(context: vscode.ExtensionContext): void {
+  const sidebarProvider = new BurbageSidebarProvider(context);
+
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(BurbageSidebarProvider.viewType, sidebarProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
     vscode.commands.registerCommand("burbage.setup", async () => {
       await runSetupProject(context);
     }),
     vscode.commands.registerCommand("burbage.sync", async () => {
-      vscode.window.showInformationMessage("Burbage sync is not implemented yet.");
+      await sidebarProvider.requestSync();
     }),
     vscode.commands.registerCommand("burbage.openChat", async () => {
-      await openChatPanel(context);
+      await sidebarProvider.reveal();
     }),
     vscode.commands.registerCommand("burbage.loginCodex", async () => {
       await openCodexLoginTerminal();
@@ -77,65 +84,108 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
   );
 }
 
-async function openChatPanel(context: vscode.ExtensionContext): Promise<void> {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!workspaceFolder) {
-    vscode.window.showErrorMessage("Open a folder/workspace before opening Burbage chat.");
-    return;
+class BurbageSidebarProvider implements vscode.WebviewViewProvider {
+  static readonly viewType = "burbage.sidebar";
+  private view?: vscode.WebviewView;
+  private threadId?: string;
+  private busy = false;
+  private queuedPrompts: Array<{ prompt: string; addUserBubble: boolean }> = [];
+
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
+    this.view = webviewView;
+    webviewView.webview.options = { enableScripts: true };
+    webviewView.webview.html = getSidebarHtml();
+
+    const disposable = webviewView.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (isSendPromptMessage(message)) {
+        await this.handlePrompt(message.text, false);
+        return;
+      }
+      if (isSyncMessage(message)) {
+        await this.handlePrompt(DEFAULT_SYNC_PROMPT, true);
+      }
+    });
+
+    webviewView.onDidDispose(() => {
+      disposable.dispose();
+      this.view = undefined;
+      this.threadId = undefined;
+      this.busy = false;
+      this.queuedPrompts = [];
+    });
+
+    this.context.subscriptions.push(disposable);
+    await this.flushQueue();
   }
 
-  const workspaceRoot = workspaceFolder.uri.fsPath;
-  const panel = vscode.window.createWebviewPanel(
-    "burbageChat",
-    "Burbage Chat",
-    vscode.ViewColumn.Beside,
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
+  async reveal(): Promise<void> {
+    await vscode.commands.executeCommand("workbench.view.extension.burbage");
+    this.view?.show?.(true);
+  }
 
-  panel.webview.html = getChatHtml();
+  async requestSync(): Promise<void> {
+    await this.reveal();
+    await this.handlePrompt(DEFAULT_SYNC_PROMPT, true);
+  }
 
-  let busy = false;
-  const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
-    if (!isSendPromptMessage(message)) {
+  private async handlePrompt(prompt: string, addUserBubble: boolean): Promise<void> {
+    const normalized = prompt.trim();
+    if (!normalized) {
       return;
     }
 
-    if (busy) {
-      void panel.webview.postMessage({
-        type: "error",
-        text: "Burbage is still processing the previous message."
-      });
+    if (!this.view) {
+      this.queuedPrompts.push({ prompt: normalized, addUserBubble });
       return;
     }
 
-    const prompt = message.text.trim();
-    if (!prompt) {
+    if (this.busy) {
+      this.queuedPrompts.push({ prompt: normalized, addUserBubble });
+      if (addUserBubble) {
+        void this.view.webview.postMessage({ type: "user", text: normalized });
+      }
       return;
     }
 
-    busy = true;
-    void panel.webview.postMessage({ type: "status", text: "Running Codex..." });
+    const workspaceRoot = getWorkspaceRootOrThrow();
+    this.busy = true;
+    if (addUserBubble) {
+      void this.view.webview.postMessage({ type: "user", text: normalized });
+    }
+    void this.view.webview.postMessage({ type: "status", text: "Running Codex..." });
 
     try {
-      const reply = await runCodexPrompt(prompt, workspaceRoot);
-      void panel.webview.postMessage({ type: "assistant", text: reply });
+      const result = await runCodexPrompt(normalized, workspaceRoot, this.threadId);
+      this.threadId = result.threadId ?? this.threadId;
+      void this.view.webview.postMessage({ type: "assistant", text: result.reply });
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
-      void panel.webview.postMessage({ type: "error", text: messageText });
+      void this.view.webview.postMessage({ type: "error", text: messageText });
     } finally {
-      busy = false;
-      void panel.webview.postMessage({ type: "status", text: "" });
+      this.busy = false;
+      void this.view.webview.postMessage({ type: "status", text: "" });
+      await this.flushQueue();
     }
-  });
+  }
 
-  panel.onDidDispose(() => {
-    messageDisposable.dispose();
-  });
-
-  context.subscriptions.push(panel, messageDisposable);
+  private async flushQueue(): Promise<void> {
+    if (!this.view || this.busy || this.queuedPrompts.length === 0) {
+      return;
+    }
+    const next = this.queuedPrompts.shift();
+    if (!next) {
+      return;
+    }
+    await this.handlePrompt(next.prompt, next.addUserBubble);
+  }
 }
 
-function isSendPromptMessage(value: unknown): value is { type: "sendPrompt"; text: string } {
+type SendPromptMessage = { type: "sendPrompt"; text: string };
+type SyncMessage = { type: "sync" };
+
+function isSendPromptMessage(value: unknown): value is SendPromptMessage {
   if (typeof value !== "object" || value === null) {
     return false;
   }
@@ -143,7 +193,22 @@ function isSendPromptMessage(value: unknown): value is { type: "sendPrompt"; tex
   return maybe.type === "sendPrompt" && typeof maybe.text === "string";
 }
 
-function getChatHtml(): string {
+function isSyncMessage(value: unknown): value is SyncMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  return (value as { type?: unknown }).type === "sync";
+}
+
+function getWorkspaceRootOrThrow(): string {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    throw new Error("Open a folder/workspace before using Burbage chat.");
+  }
+  return workspaceFolder.uri.fsPath;
+}
+
+function getSidebarHtml(): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -151,7 +216,8 @@ function getChatHtml(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body { font-family: var(--vscode-font-family); margin: 0; padding: 0; }
-    .root { display: grid; grid-template-rows: 1fr auto auto; height: 100vh; }
+    .root { display: grid; grid-template-rows: auto 1fr auto auto; height: 100vh; }
+    .actions { padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; gap: 8px; }
     .transcript { padding: 12px; overflow-y: auto; }
     .message { white-space: pre-wrap; margin: 0 0 10px 0; padding: 10px; border-radius: 6px; }
     .message.user { background: var(--vscode-editor-inactiveSelectionBackground); }
@@ -165,6 +231,9 @@ function getChatHtml(): string {
 </head>
 <body>
   <div class="root">
+    <div class="actions">
+      <button id="sync">Sync</button>
+    </div>
     <div id="transcript" class="transcript"></div>
     <div class="composer">
       <textarea id="prompt" placeholder="Ask Burbage..."></textarea>
@@ -177,6 +246,7 @@ function getChatHtml(): string {
     const transcript = document.getElementById("transcript");
     const promptEl = document.getElementById("prompt");
     const sendBtn = document.getElementById("send");
+    const syncBtn = document.getElementById("sync");
     const statusEl = document.getElementById("status");
 
     function addMessage(kind, text) {
@@ -196,8 +266,11 @@ function getChatHtml(): string {
     }
 
     sendBtn.addEventListener("click", send);
+    syncBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "sync" });
+    });
     promptEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         send();
       }
@@ -205,6 +278,7 @@ function getChatHtml(): string {
 
     window.addEventListener("message", (event) => {
       const msg = event.data;
+      if (msg.type === "user") addMessage("user", msg.text || "");
       if (msg.type === "assistant") addMessage("assistant", msg.text || "");
       if (msg.type === "error") addMessage("error", msg.text || "Unknown error");
       if (msg.type === "status") statusEl.textContent = msg.text || "";
@@ -214,24 +288,35 @@ function getChatHtml(): string {
 </html>`;
 }
 
-async function runCodexPrompt(prompt: string, workspaceRoot: string): Promise<string> {
+async function runCodexPrompt(
+  prompt: string,
+  workspaceRoot: string,
+  threadId?: string
+): Promise<{ reply: string; threadId?: string }> {
   const codexCommand = await resolveCodexCommand(workspaceRoot);
   if (!(await isCodexLoggedIn(codexCommand, workspaceRoot))) {
     throw new Error("Codex is not logged in. Run 'Burbage: Login to Codex' first.");
   }
-  const tmpDir = path.join(workspaceRoot, ".burbage", "tmp");
-  await fs.mkdir(tmpDir, { recursive: true });
-  const outputPath = path.join(tmpDir, `codex-last-${Date.now()}.txt`);
 
-  const args = [
-    "exec",
-    prompt,
-    "--skip-git-repo-check",
-    "--output-last-message",
-    outputPath,
-    "-C",
-    workspaceRoot
-  ];
+  const args = threadId
+    ? [
+        "exec",
+        "resume",
+        threadId,
+        prompt,
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox"
+      ]
+    : [
+        "exec",
+        prompt,
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-C",
+        workspaceRoot
+      ];
 
   let result: CommandResult;
   try {
@@ -240,27 +325,53 @@ async function runCodexPrompt(prompt: string, workspaceRoot: string): Promise<st
     throw new Error(formatExecError("Codex command failed.", error));
   }
 
-  let lastMessage = "";
-  try {
-    lastMessage = (await fs.readFile(outputPath, "utf8")).trim();
-  } catch {
-    // If output file was not written, we fall back to stdout/stderr.
-  } finally {
-    void fs.unlink(outputPath).catch(() => {
-      // Best effort cleanup.
-    });
-  }
+  const parsed = parseCodexJsonEvents(result.stdout);
+  const lastMessage = parsed.lastAssistantMessage?.trim() ?? "";
+  const returnedThreadId = parsed.threadId;
 
   if (lastMessage) {
-    return lastMessage;
+    return { reply: lastMessage, threadId: returnedThreadId };
   }
   if (result.stdout.trim()) {
-    return result.stdout.trim();
+    return { reply: result.stdout.trim(), threadId: returnedThreadId };
   }
   if (result.stderr.trim()) {
-    return result.stderr.trim();
+    return { reply: result.stderr.trim(), threadId: returnedThreadId };
   }
-  return "Codex returned no response text.";
+  return { reply: "Codex returned no response text.", threadId: returnedThreadId };
+}
+
+function parseCodexJsonEvents(stdout: string): { threadId?: string; lastAssistantMessage?: string } {
+  let threadId: string | undefined;
+  let lastAssistantMessage: string | undefined;
+
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line[0] !== "{") {
+      continue;
+    }
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        thread_id?: string;
+        item?: { type?: string; text?: string };
+      };
+      if (event.type === "thread.started" && typeof event.thread_id === "string") {
+        threadId = event.thread_id;
+      }
+      if (
+        event.type === "item.completed" &&
+        event.item?.type === "agent_message" &&
+        typeof event.item.text === "string"
+      ) {
+        lastAssistantMessage = event.item.text;
+      }
+    } catch {
+      // Ignore non-JSON log lines.
+    }
+  }
+
+  return { threadId, lastAssistantMessage };
 }
 
 async function resolveCodexCommand(workspaceRoot: string): Promise<string> {
