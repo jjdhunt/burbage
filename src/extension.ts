@@ -77,6 +77,7 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
 
   await ensureLocalCodexRuntime(workspaceRoot, summary);
   await ensureGitignoreEntry(workspaceRoot, ".burbage/runtime/", summary);
+  await ensureGitignoreEntry(workspaceRoot, "AGENTS.md", summary);
   await ensureCodexLogin(workspaceRoot, summary);
 
   await vscode.window.showInformationMessage(

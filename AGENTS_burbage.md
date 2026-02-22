@@ -2,7 +2,7 @@
 
 - A project has the following components that should be kept in sync:
   - The Manuscript (in `Manuscript/`) is a collection of ground-truth documents or chapters. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
-  - Named Entities:
+  - The Entities:
     - The Characters (in `Entities/characters.yaml`) are all of the unique individuals, groups, organizations, polities, or other entities with agency or narrative relevance in the Manuscript.
     - The Locations (in `Entities/locations.yaml`) are all of the unique physical, imaginary, conceptual, or mental places mentioned in the Manuscript.
     - The Events (in `Entities/events.yaml`) are all of the unique occurrences or pivotal decisions mentioned in the Manuscript. Events should be listed in as close to chronological order as possible.
@@ -10,14 +10,14 @@
 
 # Project Synchronization Rules
 
-- All the Named Entities should be kept in sync with each other and the Manuscript.
+- All the Entities should be kept in sync with each other and the Manuscript.
 - Synchronization input is the current working-tree change set, defined as:
   - tracked changes from `git diff --name-status HEAD -- Manuscript/ Entities/`
   - untracked Manuscript files from `git ls-files --others --exclude-standard -- Manuscript/`
   - Then take the union of all changed paths above and use that as the sync input.
-- You must make sure that the rest of the Entities and Manuscript agree with the changes.
-- If there are updates to the Manuscript, then you can update the Entities to agree.
-- If there are updates to the Entities, then you can review the Manuscript for inconsistencies, but do not automatically change the Manuscript. Notify the user of the issue and suggest a resolution. You can then edit the Manuscript only if explicitly instructed.
+- All changes made by the user are considered official. Do not revert them unless asked to.
+- If there are changes to the Manuscript, then you should update the Entities to agree.
+- If there are changes to the Entities, then you should review the Manuscript for inconsistencies. If you find any, notify the user and suggest a way to modify the Manuscript to resolve the issue. You can then edit the Manuscript only if explicitly instructed.
 - Only significant semantic changes matter. Minor wording-only edits that do not change facts do not require updates.
 - After completing a synchronization, you should commit all modified and untracked files along with a short commit message. Do this automatically without asking the user for permission.
 
