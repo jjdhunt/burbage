@@ -461,6 +461,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
           'Relationship: ' + d.relationshipType,
           'Formation: ' + d.formation,
           'Status: ' + d.status,
+          'Description: ' + (d.description || '(none)'),
           'Mentions: ' + formatMentions(d.mentions)
         ]);
       })
@@ -759,7 +760,7 @@ function getSidebarHtml(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     body { font-family: var(--vscode-font-family); margin: 0; padding: 0; }
-    .root { display: grid; grid-template-rows: auto 1fr auto auto; height: 100vh; }
+    .root { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
     .actions { padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; gap: 8px; }
     .transcript { padding: 12px; overflow-y: auto; }
     .message { white-space: pre-wrap; margin: 0 0 10px 0; padding: 10px; border-radius: 6px; }
@@ -767,9 +768,9 @@ function getSidebarHtml(): string {
     .message.assistant { background: var(--vscode-sideBar-background); }
     .message.error { background: var(--vscode-inputValidation-errorBackground); }
     .composer { display: block; padding: 10px; border-top: 1px solid var(--vscode-panel-border); }
-    textarea { resize: vertical; min-height: 60px; max-height: 200px; font: inherit; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 8px; border-radius: 4px; }
+    textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 60px; max-height: 200px; font: inherit; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 8px; border-radius: 4px; }
     button { font: inherit; padding: 0 14px; border-radius: 4px; border: 1px solid var(--vscode-button-border, transparent); background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-    .status { min-height: 20px; padding: 0 12px 10px 12px; color: var(--vscode-descriptionForeground); white-space: pre-wrap; }
+    .message.working { color: var(--vscode-descriptionForeground); white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -781,14 +782,13 @@ function getSidebarHtml(): string {
     <div class="composer">
       <textarea id="prompt" placeholder="Ask Burbage..."></textarea>
     </div>
-    <div id="status" class="status"></div>
   </div>
   <script>
     const vscode = acquireVsCodeApi();
     const transcript = document.getElementById("transcript");
     const promptEl = document.getElementById("prompt");
     const syncBtn = document.getElementById("sync");
-    const statusEl = document.getElementById("status");
+    let workingEl = null;
 
     function addMessage(kind, text) {
       const el = document.createElement("div");
@@ -806,6 +806,36 @@ function getSidebarHtml(): string {
       vscode.postMessage({ type: "sendPrompt", text });
     }
 
+    function setWorkingStatus(text) {
+      const next = (text || "").trim();
+      if (!next) {
+        if (workingEl && workingEl.parentElement) {
+          workingEl.remove();
+        }
+        workingEl = null;
+        return;
+      }
+
+      if (!workingEl || !workingEl.parentElement) {
+        workingEl = document.createElement("div");
+        workingEl.className = "message assistant working";
+        transcript.appendChild(workingEl);
+      }
+      workingEl.textContent = next;
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function addAssistantReply(text) {
+      if (workingEl && workingEl.parentElement) {
+        workingEl.className = "message assistant";
+        workingEl.textContent = text;
+        workingEl = null;
+        transcript.scrollTop = transcript.scrollHeight;
+        return;
+      }
+      addMessage("assistant", text);
+    }
+
     syncBtn.addEventListener("click", () => {
       vscode.postMessage({ type: "sync" });
     });
@@ -819,9 +849,9 @@ function getSidebarHtml(): string {
     window.addEventListener("message", (event) => {
       const msg = event.data;
       if (msg.type === "user") addMessage("user", msg.text || "");
-      if (msg.type === "assistant") addMessage("assistant", msg.text || "");
+      if (msg.type === "assistant") addAssistantReply(msg.text || "");
       if (msg.type === "error") addMessage("error", msg.text || "Unknown error");
-      if (msg.type === "status") statusEl.textContent = msg.text || "";
+      if (msg.type === "status") setWorkingStatus(msg.text || "");
     });
   </script>
 </body>
@@ -905,7 +935,11 @@ async function runCodexPrompt(
         }
       },
       (line) => {
-        addProgress(line);
+        const normalized = normalizeProgressLine(line);
+        if (!normalized || isToolishProgressLine(normalized)) {
+          return;
+        }
+        addProgress(normalized);
       }
     );
   } catch (error) {
@@ -959,21 +993,31 @@ function extractProgressLineFromCodexEvent(event: CodexJsonEvent): string | unde
   }
 
   const directMessage = asOptionalString(event.message) ?? asOptionalString(event.summary);
-  if (directMessage) {
+  if (directMessage && !isToolishProgressLine(directMessage)) {
     return directMessage;
   }
 
-  if (event.item?.type && typeof event.item.text === "string" && event.item.text.trim()) {
+  if (
+    event.item?.type &&
+    typeof event.item.text === "string" &&
+    event.item.text.trim() &&
+    !isToolishItemType(event.item.type)
+  ) {
     if (event.item.type === "agent_message") {
       return undefined;
     }
     return `${event.item.type}: ${event.item.text}`;
   }
 
-  if (event.type === "item.started" && event.item?.type) {
+  if (event.type === "item.started" && event.item?.type && !isToolishItemType(event.item.type)) {
     return `${event.item.type}...`;
   }
-  if (event.type === "item.completed" && event.item?.type && event.item.type !== "agent_message") {
+  if (
+    event.type === "item.completed" &&
+    event.item?.type &&
+    event.item.type !== "agent_message" &&
+    !isToolishItemType(event.item.type)
+  ) {
     return `${event.item.type} complete`;
   }
   if (event.type && event.type.includes("error")) {
@@ -993,6 +1037,28 @@ function normalizeProgressLine(rawLine: string): string | undefined {
     return cleaned;
   }
   return `${cleaned.slice(0, 137)}...`;
+}
+
+function isToolishItemType(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    lower.includes("tool") ||
+    lower.includes("command") ||
+    lower.includes("exec") ||
+    lower.includes("patch") ||
+    lower.includes("shell")
+  );
+}
+
+function isToolishProgressLine(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    lower.includes("tool call") ||
+    lower.includes("tool_call") ||
+    lower.includes("function call") ||
+    lower.includes("apply_patch") ||
+    lower.includes("shell_command")
+  );
 }
 
 function parseCodexJsonEvents(stdout: string): { threadId?: string; lastAssistantMessage?: string } {
