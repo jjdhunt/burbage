@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 
@@ -30,7 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await openCodexLoginTerminal();
     }),
     vscode.commands.registerCommand("burbage.openRelationshipDashboard", async () => {
-      await openRelationshipDashboard();
+      await openRelationshipDashboard(context);
     })
   );
 }
@@ -65,19 +65,37 @@ type RelationshipGraphData = {
   sourceLabel: string;
 };
 
-async function openRelationshipDashboard(): Promise<void> {
+type RelationshipDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
+let relationshipDashboardState: RelationshipDashboardState | undefined;
+
+async function openRelationshipDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
-    const workspaceRoot = getWorkspaceRootOrThrow();
-    const entities = await resolveEntitiesDirectory(workspaceRoot);
-    const charactersPath = path.join(entities.dirPath, "characters.yaml");
-    const relationshipsPath = path.join(entities.dirPath, "relationships.yaml");
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the relationship dashboard.");
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
 
-    const [charactersRaw, relationshipsRaw] = await Promise.all([
-      fs.readFile(charactersPath, "utf8"),
-      fs.readFile(relationshipsPath, "utf8")
-    ]);
+    if (relationshipDashboardState && relationshipDashboardState.workspaceRoot === workspaceRoot) {
+      relationshipDashboardState.panel.reveal(vscode.ViewColumn.One, true);
+      await refreshRelationshipDashboard(relationshipDashboardState, true);
+      return;
+    }
 
-    const graph = buildRelationshipGraph(parseYaml(charactersRaw), parseYaml(relationshipsRaw), entities.sourceLabel);
+    if (relationshipDashboardState) {
+      disposeRelationshipDashboardState(relationshipDashboardState);
+      relationshipDashboardState = undefined;
+    }
+
+    const graph = await loadRelationshipGraph(workspaceRoot);
+
     const panel = vscode.window.createWebviewPanel(
       "burbage.relationshipDashboard",
       "Burbage: Relationship Dashboard",
@@ -88,11 +106,88 @@ async function openRelationshipDashboard(): Promise<void> {
       }
     );
 
+    const state: RelationshipDashboardState = {
+      panel,
+      workspaceRoot,
+      watchers: []
+    };
+    relationshipDashboardState = state;
+
     panel.webview.html = getRelationshipDashboardHtml(graph);
+
+    for (const relativePath of ["Entities/characters.yaml", "Entities/relationships.yaml"]) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => scheduleRelationshipDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (relationshipDashboardState === state) {
+        relationshipDashboardState = undefined;
+      }
+      disposeRelationshipDashboardState(state);
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(`Could not open relationship dashboard: ${message}`);
   }
+}
+
+function scheduleRelationshipDashboardRefresh(state: RelationshipDashboardState): void {
+  if (relationshipDashboardState !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshRelationshipDashboard(state, false);
+  }, 180);
+}
+
+async function refreshRelationshipDashboard(
+  state: RelationshipDashboardState,
+  showErrorToUser: boolean
+): Promise<void> {
+  if (relationshipDashboardState !== state) {
+    return;
+  }
+  try {
+    const graph = await loadRelationshipGraph(state.workspaceRoot);
+    state.panel.webview.html = getRelationshipDashboardHtml(graph);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not refresh relationship dashboard: ${message}`);
+  }
+}
+
+function disposeRelationshipDashboardState(state: RelationshipDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
+}
+
+async function loadRelationshipGraph(workspaceRoot: string): Promise<RelationshipGraphData> {
+  const entities = await resolveEntitiesDirectory(workspaceRoot);
+  const charactersPath = path.join(entities.dirPath, "characters.yaml");
+  const relationshipsPath = path.join(entities.dirPath, "relationships.yaml");
+  const [charactersRaw, relationshipsRaw] = await Promise.all([
+    fs.readFile(charactersPath, "utf8"),
+    fs.readFile(relationshipsPath, "utf8")
+  ]);
+  return buildRelationshipGraph(parseYaml(charactersRaw), parseYaml(relationshipsRaw), entities.sourceLabel);
 }
 
 async function resolveEntitiesDirectory(workspaceRoot: string): Promise<{ dirPath: string; sourceLabel: string }> {
@@ -345,6 +440,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
     const container = svg.append('g');
     const linkLayer = container.append('g').attr('stroke', '#7a7a7a').attr('stroke-opacity', 0.7);
     const nodeLayer = container.append('g');
+    const labelLayer = container.append('g');
 
     const zoom = d3.zoom()
       .scaleExtent([0.2, 3.5])
@@ -397,6 +493,16 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       })
       .on('mouseout', hideTooltip);
 
+    const nodeLabel = labelLayer
+      .selectAll('text')
+      .data(graph.nodes, (d) => d.id)
+      .join('text')
+      .attr('font-size', 11)
+      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('dominant-baseline', 'middle')
+      .attr('pointer-events', 'none')
+      .text((d) => d.name);
+
     const simulation = d3.forceSimulation(graph.nodes)
       .force('link', d3.forceLink(graph.links).id((d) => d.id).distance(82).strength(0.35))
       .force('charge', d3.forceManyBody().strength(-130))
@@ -412,6 +518,10 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
         node
           .attr('cx', (d) => d.x)
           .attr('cy', (d) => d.y);
+
+        nodeLabel
+          .attr('x', (d) => d.x + 10)
+          .attr('y', (d) => d.y);
       });
 
     const drag = d3.drag()
@@ -558,10 +668,28 @@ class BurbageSidebarProvider implements vscode.WebviewViewProvider {
     if (addUserBubble) {
       void this.view.webview.postMessage({ type: "user", text: normalized });
     }
-    void this.view.webview.postMessage({ type: "status", text: "Running Codex..." });
+
+    let lastStatusText = "";
+    let lastStatusAt = 0;
+    const renderWorkingStatus = (thinkingLines: string[], force: boolean): void => {
+      if (!this.view) {
+        return;
+      }
+      const nextText = buildWorkingStatusText(thinkingLines);
+      const now = Date.now();
+      if (!force && (nextText === lastStatusText || now - lastStatusAt < 220)) {
+        return;
+      }
+      lastStatusText = nextText;
+      lastStatusAt = now;
+      void this.view.webview.postMessage({ type: "status", text: nextText });
+    };
+    renderWorkingStatus([], true);
 
     try {
-      const result = await runCodexPrompt(normalized, workspaceRoot, this.threadId);
+      const result = await runCodexPrompt(normalized, workspaceRoot, this.threadId, (thinkingLines) => {
+        renderWorkingStatus(thinkingLines, false);
+      });
       this.threadId = result.threadId ?? this.threadId;
       void this.view.webview.postMessage({ type: "assistant", text: result.reply });
     } catch (error) {
@@ -612,6 +740,17 @@ function getWorkspaceRootOrThrow(): string {
   return workspaceFolder.uri.fsPath;
 }
 
+function buildWorkingStatusText(thinkingLines: string[]): string {
+  const lines = thinkingLines
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-3);
+  if (lines.length === 0) {
+    return "Burbage is working...";
+  }
+  return ["Burbage is working...", ...lines.map((line) => `- ${line}`)].join("\n");
+}
+
 function getSidebarHtml(): string {
   return `<!doctype html>
 <html lang="en">
@@ -627,10 +766,10 @@ function getSidebarHtml(): string {
     .message.user { background: var(--vscode-editor-inactiveSelectionBackground); }
     .message.assistant { background: var(--vscode-sideBar-background); }
     .message.error { background: var(--vscode-inputValidation-errorBackground); }
-    .composer { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 10px; border-top: 1px solid var(--vscode-panel-border); }
+    .composer { display: block; padding: 10px; border-top: 1px solid var(--vscode-panel-border); }
     textarea { resize: vertical; min-height: 60px; max-height: 200px; font: inherit; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 8px; border-radius: 4px; }
     button { font: inherit; padding: 0 14px; border-radius: 4px; border: 1px solid var(--vscode-button-border, transparent); background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-    .status { min-height: 20px; padding: 0 12px 10px 12px; color: var(--vscode-descriptionForeground); }
+    .status { min-height: 20px; padding: 0 12px 10px 12px; color: var(--vscode-descriptionForeground); white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -641,7 +780,6 @@ function getSidebarHtml(): string {
     <div id="transcript" class="transcript"></div>
     <div class="composer">
       <textarea id="prompt" placeholder="Ask Burbage..."></textarea>
-      <button id="send">Send</button>
     </div>
     <div id="status" class="status"></div>
   </div>
@@ -649,7 +787,6 @@ function getSidebarHtml(): string {
     const vscode = acquireVsCodeApi();
     const transcript = document.getElementById("transcript");
     const promptEl = document.getElementById("prompt");
-    const sendBtn = document.getElementById("send");
     const syncBtn = document.getElementById("sync");
     const statusEl = document.getElementById("status");
 
@@ -669,7 +806,6 @@ function getSidebarHtml(): string {
       vscode.postMessage({ type: "sendPrompt", text });
     }
 
-    sendBtn.addEventListener("click", send);
     syncBtn.addEventListener("click", () => {
       vscode.postMessage({ type: "sync" });
     });
@@ -695,7 +831,8 @@ function getSidebarHtml(): string {
 async function runCodexPrompt(
   prompt: string,
   workspaceRoot: string,
-  threadId?: string
+  threadId?: string,
+  onProgress?: (thinkingLines: string[]) => void
 ): Promise<{ reply: string; threadId?: string }> {
   const codexCommand = await resolveCodexCommand(workspaceRoot);
   if (!(await isCodexLoggedIn(codexCommand, workspaceRoot))) {
@@ -722,16 +859,62 @@ async function runCodexPrompt(
         workspaceRoot
       ];
 
+  const progressLines: string[] = [];
+  let streamThreadId: string | undefined;
+  let streamLastAssistantMessage: string | undefined;
+
+  const addProgress = (rawLine: string): void => {
+    const normalized = normalizeProgressLine(rawLine);
+    if (!normalized) {
+      return;
+    }
+    if (progressLines[progressLines.length - 1] === normalized) {
+      return;
+    }
+    progressLines.push(normalized);
+    if (progressLines.length > 3) {
+      progressLines.splice(0, progressLines.length - 3);
+    }
+    onProgress?.([...progressLines]);
+  };
+
   let result: CommandResult;
   try {
-    result = await execCommandCapture(codexCommand, args, workspaceRoot);
+    result = await runCommandStreaming(
+      codexCommand,
+      args,
+      workspaceRoot,
+      (line) => {
+        const event = tryParseCodexJsonEvent(line);
+        if (!event) {
+          return;
+        }
+        if (event.type === "thread.started" && typeof event.thread_id === "string") {
+          streamThreadId = event.thread_id;
+        }
+        if (
+          event.type === "item.completed" &&
+          event.item?.type === "agent_message" &&
+          typeof event.item.text === "string"
+        ) {
+          streamLastAssistantMessage = event.item.text;
+        }
+        const progressLine = extractProgressLineFromCodexEvent(event);
+        if (progressLine) {
+          addProgress(progressLine);
+        }
+      },
+      (line) => {
+        addProgress(line);
+      }
+    );
   } catch (error) {
     throw new Error(formatExecError("Codex command failed.", error));
   }
 
   const parsed = parseCodexJsonEvents(result.stdout);
-  const lastMessage = parsed.lastAssistantMessage?.trim() ?? "";
-  const returnedThreadId = parsed.threadId;
+  const lastMessage = (streamLastAssistantMessage ?? parsed.lastAssistantMessage)?.trim() ?? "";
+  const returnedThreadId = streamThreadId ?? parsed.threadId;
 
   if (lastMessage) {
     return { reply: lastMessage, threadId: returnedThreadId };
@@ -743,6 +926,73 @@ async function runCodexPrompt(
     return { reply: result.stderr.trim(), threadId: returnedThreadId };
   }
   return { reply: "Codex returned no response text.", threadId: returnedThreadId };
+}
+
+type CodexJsonEvent = {
+  type?: string;
+  thread_id?: string;
+  item?: { type?: string; text?: string };
+  message?: string;
+  summary?: string;
+  error?: unknown;
+};
+
+function tryParseCodexJsonEvent(line: string): CodexJsonEvent | undefined {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed[0] !== "{") {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed) as CodexJsonEvent;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractProgressLineFromCodexEvent(event: CodexJsonEvent): string | undefined {
+  if (
+    event.type === "item.completed" &&
+    event.item?.type === "agent_message" &&
+    typeof event.item.text === "string"
+  ) {
+    return undefined;
+  }
+
+  const directMessage = asOptionalString(event.message) ?? asOptionalString(event.summary);
+  if (directMessage) {
+    return directMessage;
+  }
+
+  if (event.item?.type && typeof event.item.text === "string" && event.item.text.trim()) {
+    if (event.item.type === "agent_message") {
+      return undefined;
+    }
+    return `${event.item.type}: ${event.item.text}`;
+  }
+
+  if (event.type === "item.started" && event.item?.type) {
+    return `${event.item.type}...`;
+  }
+  if (event.type === "item.completed" && event.item?.type && event.item.type !== "agent_message") {
+    return `${event.item.type} complete`;
+  }
+  if (event.type && event.type.includes("error")) {
+    const errorText = asOptionalString(event.error) ?? "Codex reported an error event";
+    return `${event.type}: ${errorText}`;
+  }
+
+  return undefined;
+}
+
+function normalizeProgressLine(rawLine: string): string | undefined {
+  const cleaned = rawLine.replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return undefined;
+  }
+  if (cleaned.length <= 140) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, 137)}...`;
 }
 
 function parseCodexJsonEvents(stdout: string): { threadId?: string; lastAssistantMessage?: string } {
@@ -1029,6 +1279,85 @@ async function runNpmViaLoginShell(args: string[], cwd: string): Promise<void> {
     throw lastError;
   }
   throw new Error("No usable POSIX shell found to resolve npm.");
+}
+
+async function runCommandStreaming(
+  command: string,
+  args: string[],
+  cwd: string,
+  onStdoutLine: (line: string) => void,
+  onStderrLine: (line: string) => void
+): Promise<CommandResult> {
+  let spawnCommand = command;
+  let spawnArgs = args;
+  if (process.platform === "win32" && isCmdScript(command)) {
+    const powershell = await resolvePowerShellExecutable();
+    spawnCommand = powershell;
+    spawnArgs = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", buildPowerShellInvocation(command, args)];
+  }
+
+  return await new Promise<CommandResult>((resolve, reject) => {
+    const child = spawn(spawnCommand, spawnArgs, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+
+    const flushLines = (buffer: string, onLine: (line: string) => void): string => {
+      let pending = buffer;
+      let newlineIndex = pending.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = pending.slice(0, newlineIndex).replace(/\r$/, "");
+        onLine(line);
+        pending = pending.slice(newlineIndex + 1);
+        newlineIndex = pending.indexOf("\n");
+      }
+      return pending;
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      const text = asText(chunk);
+      stdout += text;
+      stdoutBuffer += text;
+      stdoutBuffer = flushLines(stdoutBuffer, onStdoutLine);
+    });
+
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      const text = asText(chunk);
+      stderr += text;
+      stderrBuffer += text;
+      stderrBuffer = flushLines(stderrBuffer, onStderrLine);
+    });
+
+    child.on("error", (error) => {
+      const wrapped = error as Error & { stdout?: string; stderr?: string };
+      wrapped.stdout = stdout;
+      wrapped.stderr = stderr;
+      reject(wrapped);
+    });
+
+    child.on("close", (code) => {
+      if (stdoutBuffer.trim()) {
+        onStdoutLine(stdoutBuffer.replace(/\r$/, ""));
+      }
+      if (stderrBuffer.trim()) {
+        onStderrLine(stderrBuffer.replace(/\r$/, ""));
+      }
+
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const error = new Error(`Process exited with code ${code ?? "unknown"}`) as Error & {
+        stdout?: string;
+        stderr?: string;
+      };
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+    });
+  });
 }
 
 async function execCommand(command: string, args: string[], cwd: string): Promise<void> {
