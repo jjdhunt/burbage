@@ -1,7 +1,7 @@
 ﻿# Project Overview
 
 - A project has the following components that should be kept in sync:
-  - The Manuscript (in `Manuscript/`) is a collection of ground-truth documents or chapters. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
+  - The Manuscript (in `Manuscript/`) is a collection of ground-truth documents. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
   - The Entities:
     - The Characters (in `Entities/characters.yaml`) are all of the unique individuals, groups, organizations, polities, or other entities with agency or narrative relevance in the Manuscript.
     - The Locations (in `Entities/locations.yaml`) are all of the unique physical, imaginary, conceptual, or mental places mentioned in the Manuscript.
@@ -50,6 +50,7 @@ Structure:
 
 ```yaml
 <character name>:
+  mentions: [<document reference>, ...]
   type: <species, class, organization type, or form>
   age: <birth information, lifespan, or descriptive age>
   sex: <sex or gender identifier>
@@ -60,6 +61,7 @@ Structure:
 
 Field definitions:
 
+- `mentions` (Required): list of Manuscript documents that mention the character.
 - `type` (Required): species, class, organization type, or form.
 - `age` (Optional): birth information, lifespan, or descriptive age.
 - `sex` (Optional): sex or gender identifier.
@@ -75,12 +77,14 @@ Structure:
 
 ```yaml
 <location name>:
+  mentions: [<document reference>, ...]
   region: <parent location name or `null`>
   description: <short description>
 ```
 
 Field definitions:
 
+- `mentions` (Required): list of Manuscript documents that mention the location.
 - `region` (Optional): parent region/location key; if non-empty, must match another key in `locations.yaml`.
 - `description` (Required): short free-text description.
 
@@ -92,7 +96,7 @@ Structure:
 
 ```yaml
 <event title>:
-  chapters: [<chapter reference>, ...]
+  mentions: [<document reference>, ...]
   date: <in-universe time marker or `null`>
   locations: [<location name>, ...]
   parties: [<character name>, ...]
@@ -101,7 +105,7 @@ Structure:
 
 Field definitions:
 
-- `chapters` (Required): list of chapters/documents that mention the event.
+- `mentions` (Required): list of Manuscript documents that mention the event.
 - `date` (Optional): in-universe time marker.
 - `locations` (Optional): list of location keys; if non-empty, must match keys in `Entities/locations.yaml`.
 - `parties` (Optional): list of character/entity keys; if non-empty, must match keys in `Entities/characters.yaml`.
@@ -115,6 +119,7 @@ Structure:
 
 ```yaml
 <relationship name>:
+  mentions: [<document reference>, ...]
   parties: [<character A name>, <character B name>, ...]
   type: <relationship type>
   formation: <in-universe time when relationship began or `null`>
@@ -124,6 +129,7 @@ Structure:
 
 Field definitions:
 
+- `mentions` (Required): list of Manuscript documents that mention the relationship.
 - `parties` (Required): list of two or more involved entity names; every entry must match keys in `Entities/characters.yaml`.
 - `type` (Required): relationship category (for example ally, rival, parent, subordinate, patron).
 - `formation` (Optional): in-universe time when the relationship began.
