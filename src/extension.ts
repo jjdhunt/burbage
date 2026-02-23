@@ -379,6 +379,8 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
     window.addEventListener('resize', () => {
       setSize();
       simulation.force('center', d3.forceCenter(width / 2, height / 2));
+      simulation.force('x', d3.forceX(width / 2).strength(0.015));
+      simulation.force('y', d3.forceY(height / 2).strength(0.015));
       simulation.alpha(0.35).restart();
     });
 
@@ -508,6 +510,8 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .force('link', d3.forceLink(graph.links).id((d) => d.id).distance(82).strength(0.35))
       .force('charge', d3.forceManyBody().strength(-130))
       .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('x', d3.forceX(width / 2).strength(0.015))
+      .force('y', d3.forceY(height / 2).strength(0.015))
       .force('collision', d3.forceCollide(16))
       .on('tick', () => {
         link
