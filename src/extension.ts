@@ -71,6 +71,7 @@ type RelationshipGraphData = {
 type RelationshipDashboardState = {
   panel: vscode.WebviewPanel;
   workspaceRoot: string;
+  graph: RelationshipGraphData;
   watchers: vscode.FileSystemWatcher[];
   refreshTimer?: NodeJS.Timeout;
 };
@@ -108,8 +109,14 @@ type TimelineGraphData = {
 type TimelineDashboardState = {
   panel: vscode.WebviewPanel;
   workspaceRoot: string;
+  graph: TimelineGraphData;
   watchers: vscode.FileSystemWatcher[];
   refreshTimer?: NodeJS.Timeout;
+};
+
+type DashboardHtmlOptions = {
+  includeSaveButton?: boolean;
+  standaloneDarkMode?: boolean;
 };
 
 let relationshipDashboardState: RelationshipDashboardState | undefined;
@@ -150,11 +157,20 @@ async function openRelationshipDashboard(context: vscode.ExtensionContext): Prom
     const state: RelationshipDashboardState = {
       panel,
       workspaceRoot,
+      graph,
       watchers: []
     };
     relationshipDashboardState = state;
 
     panel.webview.html = getRelationshipDashboardHtml(graph);
+
+    const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (!isSaveDashboardMessage(message)) {
+        return;
+      }
+      await saveRelationshipDashboardSnapshot(state);
+    });
+    context.subscriptions.push(messageDisposable);
 
     for (const relativePath of ["Entities/characters.yaml", "Entities/relationships.yaml"]) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
@@ -199,6 +215,7 @@ async function refreshRelationshipDashboard(
   }
   try {
     const graph = await loadRelationshipGraph(state.workspaceRoot);
+    state.graph = graph;
     state.panel.webview.html = getRelationshipDashboardHtml(graph);
   } catch (error) {
     if (!showErrorToUser) {
@@ -304,9 +321,30 @@ function buildRelationshipGraph(
   return { nodes, links, sourceLabel };
 }
 
-function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
+function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: DashboardHtmlOptions = {}): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
-  const title = `Relationships (${graph.sourceLabel})`;
+  const includeSaveButton = options.includeSaveButton ?? true;
+  const standaloneDarkMode = options.standaloneDarkMode ?? false;
+  const rootCssVars = standaloneDarkMode
+    ? `color-scheme: dark;
+      --dashboard-bg: #0f1318;
+      --dashboard-fg: #e7edf3;
+      --dashboard-border: #2a3340;
+      --dashboard-widget-bg: #181f28;
+      --dashboard-description: #9aa7b8;
+      --dashboard-tooltip-bg: rgba(21, 28, 36, 0.95);
+      --dashboard-tooltip-fg: #f3f6fb;
+      --dashboard-font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;`
+    : `color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-tooltip-bg: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
+  const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -315,29 +353,21 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     :root {
-      color-scheme: light dark;
+      ${rootCssVars}
     }
     html, body {
       margin: 0;
       padding: 0;
       width: 100%;
       height: 100%;
-      background: var(--vscode-editor-background);
-      color: var(--vscode-editor-foreground);
-      font-family: var(--vscode-font-family);
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
       overflow: hidden;
     }
     .root {
-      display: grid;
-      grid-template-rows: auto 1fr;
       width: 100%;
       height: 100%;
-    }
-    .header {
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--vscode-panel-border);
-      font-size: 13px;
-      color: var(--vscode-descriptionForeground);
     }
     #graph {
       width: 100%;
@@ -350,9 +380,9 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       max-width: 380px;
       padding: 8px 10px;
       border-radius: 6px;
-      border: 1px solid var(--vscode-panel-border);
-      background: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
-      color: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-tooltip-bg);
+      color: var(--dashboard-tooltip-fg);
       box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
       pointer-events: none;
       white-space: pre-wrap;
@@ -365,8 +395,8 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       left: 14px;
       bottom: 14px;
       z-index: 100;
-      border: 1px solid var(--vscode-panel-border);
-      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
       border-radius: 6px;
       padding: 8px 10px;
       font-size: 12px;
@@ -376,7 +406,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
     }
     .legend-title {
       margin: 0 0 6px 0;
-      color: var(--vscode-descriptionForeground);
+      color: var(--dashboard-description);
     }
     .legend-row {
       display: flex;
@@ -390,11 +420,24 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       border-radius: 50%;
       flex-shrink: 0;
     }
+    .save-button {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 120;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
+  ${saveButtonHtml}
   <div class="root">
-    <div class="header">${escapeHtml(title)} - hover nodes/links for details, drag nodes to reposition.</div>
     <svg id="graph"></svg>
   </div>
   <div id="tooltip" class="tooltip"></div>
@@ -402,9 +445,19 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
     const legend = document.getElementById('legend');
+    const saveButton = document.getElementById('save-dashboard');
+    if (saveButton && vscodeApi) {
+      saveButton.addEventListener('click', () => {
+        vscodeApi.postMessage({ type: 'saveDashboard' });
+      });
+    }
+    if (saveButton && !vscodeApi) {
+      saveButton.style.display = 'none';
+    }
     let width = 0;
     let height = 0;
     let dragging = false;
@@ -412,7 +465,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
     function setSize() {
       const rect = document.body.getBoundingClientRect();
       width = Math.max(300, rect.width);
-      height = Math.max(300, rect.height - 42);
+      height = Math.max(300, rect.height);
       svg.attr('viewBox', [0, 0, width, height]);
     }
 
@@ -574,7 +627,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .data(graph.nodes, (d) => d.id)
       .join('text')
       .attr('font-size', 11)
-      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('fill', 'var(--dashboard-fg)')
       .attr('dominant-baseline', 'middle')
       .attr('pointer-events', 'none')
       .text((d) => d.name);
@@ -667,11 +720,20 @@ async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<
     const state: TimelineDashboardState = {
       panel,
       workspaceRoot,
+      graph,
       watchers: []
     };
     timelineDashboardState = state;
 
     panel.webview.html = getTimelineDashboardHtml(graph);
+
+    const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (!isSaveDashboardMessage(message)) {
+        return;
+      }
+      await saveTimelineDashboardSnapshot(state);
+    });
+    context.subscriptions.push(messageDisposable);
 
     for (const relativePath of ["Entities/characters.yaml", "Entities/locations.yaml", "Entities/events.yaml", "Manuscript/**"]) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
@@ -713,6 +775,7 @@ async function refreshTimelineDashboard(state: TimelineDashboardState, showError
   }
   try {
     const graph = await loadTimelineGraph(state.workspaceRoot);
+    state.graph = graph;
     state.panel.webview.html = getTimelineDashboardHtml(graph);
   } catch (error) {
     if (!showErrorToUser) {
@@ -732,6 +795,43 @@ function disposeTimelineDashboardState(state: TimelineDashboardState): void {
     watcher.dispose();
   }
   state.watchers = [];
+}
+
+async function saveRelationshipDashboardSnapshot(state: RelationshipDashboardState): Promise<void> {
+  try {
+    const html = getRelationshipDashboardHtml(state.graph, {
+      includeSaveButton: false,
+      standaloneDarkMode: true
+    });
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, "relationship-dashboard.html", html);
+    vscode.window.showInformationMessage(`Saved relationship dashboard to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not save relationship dashboard: ${message}`);
+  }
+}
+
+async function saveTimelineDashboardSnapshot(state: TimelineDashboardState): Promise<void> {
+  try {
+    const html = getTimelineDashboardHtml(state.graph, {
+      includeSaveButton: false,
+      standaloneDarkMode: true
+    });
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, "timeline-dashboard.html", html);
+    vscode.window.showInformationMessage(`Saved timeline dashboard to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not save timeline dashboard: ${message}`);
+  }
+}
+
+async function writeDashboardSnapshotFile(workspaceRoot: string, fileName: string, html: string): Promise<string> {
+  const dashboardsDirPath = path.join(workspaceRoot, "dashboards");
+  await fs.mkdir(dashboardsDirPath, { recursive: true });
+
+  const outputPath = path.join(dashboardsDirPath, fileName);
+  await fs.writeFile(outputPath, html, "utf8");
+  return outputPath;
 }
 
 async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphData> {
@@ -979,9 +1079,30 @@ function buildTimelineGraph(
   };
 }
 
-function getTimelineDashboardHtml(graph: TimelineGraphData): string {
+function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHtmlOptions = {}): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
-  const title = `Timeline (${graph.sourceLabel})`;
+  const includeSaveButton = options.includeSaveButton ?? true;
+  const standaloneDarkMode = options.standaloneDarkMode ?? false;
+  const rootCssVars = standaloneDarkMode
+    ? `color-scheme: dark;
+      --dashboard-bg: #0f1318;
+      --dashboard-fg: #e7edf3;
+      --dashboard-border: #2a3340;
+      --dashboard-widget-bg: #181f28;
+      --dashboard-description: #9aa7b8;
+      --dashboard-tooltip-bg: rgba(21, 28, 36, 0.95);
+      --dashboard-tooltip-fg: #f3f6fb;
+      --dashboard-font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;`
+    : `color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-tooltip-bg: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
+  const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -990,29 +1111,21 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     :root {
-      color-scheme: light dark;
+      ${rootCssVars}
     }
     html, body {
       margin: 0;
       padding: 0;
       width: 100%;
       height: 100%;
-      background: var(--vscode-editor-background);
-      color: var(--vscode-editor-foreground);
-      font-family: var(--vscode-font-family);
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
       overflow: hidden;
     }
     .root {
-      display: grid;
-      grid-template-rows: auto 1fr;
       width: 100%;
       height: 100%;
-    }
-    .header {
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--vscode-panel-border);
-      font-size: 13px;
-      color: var(--vscode-descriptionForeground);
     }
     #graph {
       width: 100%;
@@ -1025,9 +1138,9 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       max-width: 420px;
       padding: 8px 10px;
       border-radius: 6px;
-      border: 1px solid var(--vscode-panel-border);
-      background: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
-      color: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-tooltip-bg);
+      color: var(--dashboard-tooltip-fg);
       box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
       pointer-events: none;
       white-space: pre-wrap;
@@ -1040,8 +1153,8 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       left: 14px;
       bottom: 14px;
       z-index: 100;
-      border: 1px solid var(--vscode-panel-border);
-      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
       border-radius: 6px;
       padding: 8px 10px;
       font-size: 12px;
@@ -1051,7 +1164,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     }
     .legend-title {
       margin: 8px 0 6px 0;
-      color: var(--vscode-descriptionForeground);
+      color: var(--dashboard-description);
     }
     .legend-title:first-child {
       margin-top: 0;
@@ -1068,11 +1181,24 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       border-radius: 50%;
       flex-shrink: 0;
     }
+    .save-button {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 120;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
+  ${saveButtonHtml}
   <div class="root">
-    <div class="header">${escapeHtml(title)} - drag nodes to inspect local structure; the event backbone auto-snaps into timeline order.</div>
     <svg id="graph"></svg>
   </div>
   <div id="tooltip" class="tooltip"></div>
@@ -1080,9 +1206,19 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
     const legend = document.getElementById('legend');
+    const saveButton = document.getElementById('save-dashboard');
+    if (saveButton && vscodeApi) {
+      saveButton.addEventListener('click', () => {
+        vscodeApi.postMessage({ type: 'saveDashboard' });
+      });
+    }
+    if (saveButton && !vscodeApi) {
+      saveButton.style.display = 'none';
+    }
     const aspect = 0.5;
     let width = 0;
     let height = 0;
@@ -1125,7 +1261,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     function setSize() {
       const rect = document.body.getBoundingClientRect();
       width = Math.max(420, rect.width);
-      height = Math.max(320, rect.height - 42);
+      height = Math.max(320, rect.height);
       svg.attr('viewBox', [0, 0, width, height]);
     }
 
@@ -1345,6 +1481,42 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       return typeof linkEnd === 'string' ? linkEnd : linkEnd.id;
     }
 
+    function trimmedBackboneEdge(edgeDatum) {
+      const sourceNode = edgeDatum.source;
+      const targetNode = edgeDatum.target;
+      const sourceX = sourceNode.x || 0;
+      const sourceY = sourceNode.y || 0;
+      const targetX = targetNode.x || 0;
+      const targetY = targetNode.y || 0;
+      const dx = targetX - sourceX;
+      const dy = targetY - sourceY;
+      const length = Math.hypot(dx, dy);
+
+      if (!Number.isFinite(length) || length < 0.001) {
+        return {
+          x1: sourceX,
+          y1: sourceY,
+          x2: targetX,
+          y2: targetY
+        };
+      }
+
+      const ux = dx / length;
+      const uy = dy / length;
+      const sourceInset = nodeRadius(sourceNode) + 1;
+      const targetInset = nodeRadius(targetNode) + 2;
+      const usableLength = Math.max(1, length - sourceInset - targetInset);
+      const sourceOffset = Math.min(sourceInset, Math.max(0, (length - 1) * 0.5));
+      const targetOffset = Math.min(targetInset, Math.max(0, length - sourceOffset - usableLength));
+
+      return {
+        x1: sourceX + ux * sourceOffset,
+        y1: sourceY + uy * sourceOffset,
+        x2: targetX - ux * targetOffset,
+        y2: targetY - uy * targetOffset
+      };
+    }
+
     function timelineLinkPath(linkDatum) {
       const sourceNode = typeof linkDatum.source === 'string' ? nodeById.get(linkDatum.source) : linkDatum.source;
       const targetNode = typeof linkDatum.target === 'string' ? nodeById.get(linkDatum.target) : linkDatum.target;
@@ -1493,7 +1665,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .join('text')
       .attr('class', 'character')
       .attr('font-size', 11)
-      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('fill', 'var(--dashboard-fg)')
       .attr('dominant-baseline', 'middle')
       .attr('pointer-events', 'none')
       .text((d) => d.name);
@@ -1504,7 +1676,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .join('text')
       .attr('class', 'document')
       .attr('font-size', 11)
-      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('fill', 'var(--dashboard-fg)')
       .attr('dominant-baseline', 'hanging')
       .attr('pointer-events', 'none')
       .text((d) => d.name);
@@ -1515,7 +1687,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .join('text')
       .attr('class', 'event')
       .attr('font-size', 11)
-      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('fill', 'var(--dashboard-fg)')
       .attr('dominant-baseline', 'hanging')
       .attr('pointer-events', 'none')
       .text((d) => d.name);
@@ -1547,10 +1719,10 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .force('collision', d3.forceCollide((d) => nodeRadius(d) + 3).strength(0.85))
       .on('tick', () => {
         backboneEdge
-          .attr('x1', (d) => d.source.x)
-          .attr('y1', (d) => d.source.y)
-          .attr('x2', (d) => d.target.x)
-          .attr('y2', (d) => d.target.y);
+          .attr('x1', (d) => trimmedBackboneEdge(d).x1)
+          .attr('y1', (d) => trimmedBackboneEdge(d).y1)
+          .attr('x2', (d) => trimmedBackboneEdge(d).x2)
+          .attr('y2', (d) => trimmedBackboneEdge(d).y2);
 
         link
           .attr('d', (d) => timelineLinkPath(d));
@@ -1778,6 +1950,7 @@ class BurbageSidebarProvider implements vscode.WebviewViewProvider {
 
 type SendPromptMessage = { type: "sendPrompt"; text: string };
 type SyncMessage = { type: "sync" };
+type SaveDashboardMessage = { type: "saveDashboard" };
 
 function isSendPromptMessage(value: unknown): value is SendPromptMessage {
   if (typeof value !== "object" || value === null) {
@@ -1792,6 +1965,13 @@ function isSyncMessage(value: unknown): value is SyncMessage {
     return false;
   }
   return (value as { type?: unknown }).type === "sync";
+}
+
+function isSaveDashboardMessage(value: unknown): value is SaveDashboardMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  return (value as { type?: unknown }).type === "saveDashboard";
 }
 
 function getWorkspaceRootOrThrow(): string {

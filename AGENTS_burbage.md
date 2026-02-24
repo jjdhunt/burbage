@@ -79,6 +79,7 @@ Structure:
 <location name>:
   mentions: [<document reference>, ...]
   region: <parent location name or `null`>
+  adjacent: [<adjacent location>, ...]
   description: <short description>
 ```
 
@@ -86,6 +87,7 @@ Field definitions:
 
 - `mentions` (Required): list of Manuscript documents that mention the location.
 - `region` (Optional): parent region/location key; if non-empty, must match another key in `locations.yaml`.
+- `adjacent` (Optional): connected/adjacent location key; if non-empty, must match another key in `locations.yaml`. Adjacent locations are those mentioned as nearby or which one must travel through to get to another region. If someone travels from A to B to C, A and B are adjacent, B and C are adjacent, but B and C are not adjacent. If A is adjacent to B, B is adjacent to A.
 - `description` (Required): short free-text description.
 
 ## events.yaml
@@ -101,6 +103,7 @@ Structure:
   locations: [<location name>, ...]
   parties: [<character name>, ...]
   summary: <short prose description>
+  valence: <protagonist goodness score, integer>
 ```
 
 Field definitions:
@@ -110,6 +113,7 @@ Field definitions:
 - `locations` (Optional): list of location keys; if non-empty, must match keys in `Entities/locations.yaml`.
 - `parties` (Optional): list of character/entity keys; if non-empty, must match keys in `Entities/characters.yaml`.
 - `summary` (Required): short prose description.
+- `valence` (Required): subjective 'goodness' score, from the perspective of the protagonist. 1-10, with 1 - worst thing that happens in the Manuscript, 10 - best thing that happens in the Manuscript.
 
 ## relationships.yaml
 

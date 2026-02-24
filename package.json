@@ -2,7 +2,7 @@
   "name": "burbage",
   "displayName": "Burbage",
   "description": "Entity synchronization assistant for structured text projects.",
-  "version": "0.0.51",
+  "version": "0.0.55",
   "publisher": "jack-local",
   "license": "MIT",
   "engines": {
