@@ -2,7 +2,7 @@
   "name": "burbage",
   "displayName": "Burbage",
   "description": "Entity synchronization assistant for structured text projects.",
-  "version": "0.0.32",
+  "version": "0.0.35",
   "publisher": "jack-local",
   "license": "MIT",
   "engines": {
@@ -17,6 +17,7 @@
     "onCommand:burbage.openChat",
     "onCommand:burbage.loginCodex",
     "onCommand:burbage.openRelationshipDashboard",
+    "onCommand:burbage.openTimelineDashboard",
     "onView:burbage.sidebar"
   ],
   "main": "./dist/extension.js",
@@ -59,6 +60,10 @@
       {
         "command": "burbage.openRelationshipDashboard",
         "title": "Burbage: Open Relationship Dashboard"
+      },
+      {
+        "command": "burbage.openTimelineDashboard",
+        "title": "Burbage: Open Timeline Dashboard"
       }
     ]
   },

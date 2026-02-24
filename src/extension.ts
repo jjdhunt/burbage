@@ -31,6 +31,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("burbage.openRelationshipDashboard", async () => {
       await openRelationshipDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openTimelineDashboard", async () => {
+      await openTimelineDashboard(context);
     })
   );
 }
@@ -72,7 +75,45 @@ type RelationshipDashboardState = {
   refreshTimer?: NodeJS.Timeout;
 };
 
+type TimelineNodeKind = "event" | "character" | "document";
+
+type TimelineGraphNode = {
+  id: string;
+  name: string;
+  nodeKind: TimelineNodeKind;
+  mentions: string[];
+  connectedEventSpan: number;
+  connectedEventCount: number;
+  meanEventIndex: number;
+  eventIndex?: number;
+  characterType?: string;
+  bio?: string;
+  date?: string;
+  summary?: string;
+};
+
+type TimelineGraphLink = {
+  id: string;
+  source: string;
+  target: string;
+  linkKind: "party" | "mention";
+};
+
+type TimelineGraphData = {
+  nodes: TimelineGraphNode[];
+  links: TimelineGraphLink[];
+  sourceLabel: string;
+};
+
+type TimelineDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
 let relationshipDashboardState: RelationshipDashboardState | undefined;
+let timelineDashboardState: TimelineDashboardState | undefined;
 
 async function openRelationshipDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
@@ -534,6 +575,800 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
         dragging = true;
         hideTooltip();
         if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on('drag', (event, d) => {
+        hideTooltip();
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on('end', (event, d) => {
+        dragging = false;
+        hideTooltip();
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+
+    node.call(drag);
+  </script>
+</body>
+</html>`;
+}
+
+async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the timeline dashboard.");
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+
+    if (timelineDashboardState && timelineDashboardState.workspaceRoot === workspaceRoot) {
+      timelineDashboardState.panel.reveal(vscode.ViewColumn.One, true);
+      await refreshTimelineDashboard(timelineDashboardState, true);
+      return;
+    }
+
+    if (timelineDashboardState) {
+      disposeTimelineDashboardState(timelineDashboardState);
+      timelineDashboardState = undefined;
+    }
+
+    const graph = await loadTimelineGraph(workspaceRoot);
+
+    const panel = vscode.window.createWebviewPanel(
+      "burbage.timelineDashboard",
+      "Burbage: Timeline Dashboard",
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+
+    const state: TimelineDashboardState = {
+      panel,
+      workspaceRoot,
+      watchers: []
+    };
+    timelineDashboardState = state;
+
+    panel.webview.html = getTimelineDashboardHtml(graph);
+
+    for (const relativePath of ["Entities/characters.yaml", "Entities/events.yaml", "Manuscript/**"]) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => scheduleTimelineDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (timelineDashboardState === state) {
+        timelineDashboardState = undefined;
+      }
+      disposeTimelineDashboardState(state);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not open timeline dashboard: ${message}`);
+  }
+}
+
+function scheduleTimelineDashboardRefresh(state: TimelineDashboardState): void {
+  if (timelineDashboardState !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshTimelineDashboard(state, false);
+  }, 180);
+}
+
+async function refreshTimelineDashboard(state: TimelineDashboardState, showErrorToUser: boolean): Promise<void> {
+  if (timelineDashboardState !== state) {
+    return;
+  }
+  try {
+    const graph = await loadTimelineGraph(state.workspaceRoot);
+    state.panel.webview.html = getTimelineDashboardHtml(graph);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not refresh timeline dashboard: ${message}`);
+  }
+}
+
+function disposeTimelineDashboardState(state: TimelineDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
+}
+
+async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphData> {
+  const sources = await resolveTimelineDataSources(workspaceRoot);
+  const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
+  const charactersPath = path.join(sources.entitiesDirPath, "characters.yaml");
+  const [eventsRaw, charactersRaw, manuscriptDocuments] = await Promise.all([
+    fs.readFile(eventsPath, "utf8"),
+    fs.readFile(charactersPath, "utf8"),
+    listManuscriptDocuments(sources.manuscriptDirPath)
+  ]);
+
+  return buildTimelineGraph(parseYaml(eventsRaw), parseYaml(charactersRaw), manuscriptDocuments, sources.sourceLabel);
+}
+
+async function resolveTimelineDataSources(workspaceRoot: string): Promise<{
+  entitiesDirPath: string;
+  manuscriptDirPath: string;
+  sourceLabel: string;
+}> {
+  const entitiesDirPath = path.join(workspaceRoot, "Entities");
+  const manuscriptDirPath = path.join(workspaceRoot, "Manuscript");
+  const hasCharacters = await pathExists(path.join(entitiesDirPath, "characters.yaml"));
+  const hasEvents = await pathExists(path.join(entitiesDirPath, "events.yaml"));
+  const hasManuscriptDir = await pathExists(manuscriptDirPath);
+  if (hasCharacters && hasEvents && hasManuscriptDir) {
+    return {
+      entitiesDirPath,
+      manuscriptDirPath,
+      sourceLabel: "Entities/ + Manuscript/"
+    };
+  }
+
+  throw new Error("Missing characters.yaml/events.yaml in Entities/ or missing Manuscript/ directory.");
+}
+
+function buildTimelineGraph(
+  eventsDocument: unknown,
+  charactersDocument: unknown,
+  manuscriptDocuments: string[],
+  sourceLabel: string
+): TimelineGraphData {
+  const eventsRecord = asRecord(eventsDocument);
+  const charactersRecord = asRecord(charactersDocument);
+  const eventEntries = Object.entries(eventsRecord);
+  const knownCharacters = new Set(Object.keys(charactersRecord));
+
+  const documentOrder: string[] = [];
+  const knownDocuments = new Set<string>();
+  for (const manuscriptDocument of manuscriptDocuments) {
+    const normalized = normalizeDocumentReference(manuscriptDocument);
+    if (!normalized || knownDocuments.has(normalized)) {
+      continue;
+    }
+    knownDocuments.add(normalized);
+    documentOrder.push(normalized);
+  }
+  const documentsByLower = new Map<string, string>();
+  const documentsByBasenameLower = new Map<string, string[]>();
+  const documentsByStemLower = new Map<string, string[]>();
+  for (const documentName of documentOrder) {
+    documentsByLower.set(documentName.toLowerCase(), documentName);
+
+    const basenameLower = path.posix.basename(documentName).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    basenameMatches.push(documentName);
+    documentsByBasenameLower.set(basenameLower, basenameMatches);
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    stemMatches.push(documentName);
+    documentsByStemLower.set(stemLower, stemMatches);
+  }
+
+  const resolveEventMentionDocument = (mentionReference: string): string | undefined => {
+    const normalizedMention = normalizeDocumentReference(mentionReference);
+    if (!normalizedMention) {
+      return undefined;
+    }
+
+    const exact = documentsByLower.get(normalizedMention.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+
+    const basenameLower = path.posix.basename(normalizedMention).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    if (basenameMatches.length === 1) {
+      return basenameMatches[0];
+    }
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    if (stemMatches.length === 1) {
+      return stemMatches[0];
+    }
+
+    return undefined;
+  };
+
+  const characterEventMap = new Map<string, Set<number>>();
+  const documentEventMap = new Map<string, Set<number>>();
+  const nodes: TimelineGraphNode[] = [];
+  const links: TimelineGraphLink[] = [];
+
+  for (let eventIndex = 0; eventIndex < eventEntries.length; eventIndex += 1) {
+    const [eventName, eventValue] = eventEntries[eventIndex];
+    const event = asRecord(eventValue);
+    const eventMentions = toUniqueStrings(
+      asStringArray(event["mentions"])
+        .map((mention) => resolveEventMentionDocument(mention))
+        .filter((mention): mention is string => typeof mention === "string")
+    );
+    const eventParties = toUniqueStrings(asStringArray(event["parties"]));
+    const eventId = `event:${eventName}`;
+
+    nodes.push({
+      id: eventId,
+      name: eventName,
+      nodeKind: "event",
+      mentions: eventMentions,
+      connectedEventSpan: 0,
+      connectedEventCount: 1,
+      meanEventIndex: eventIndex,
+      eventIndex,
+      date: asOptionalString(event["date"]) ?? "",
+      summary: asOptionalString(event["summary"]) ?? ""
+    });
+
+    for (const partyName of eventParties) {
+      if (!knownCharacters.has(partyName)) {
+        continue;
+      }
+
+      const characterId = `character:${partyName}`;
+      links.push({
+        id: `party:${eventName}:${partyName}`,
+        source: characterId,
+        target: eventId,
+        linkKind: "party"
+      });
+
+      const eventIndices = characterEventMap.get(partyName) ?? new Set<number>();
+      eventIndices.add(eventIndex);
+      characterEventMap.set(partyName, eventIndices);
+    }
+
+    for (const mention of eventMentions) {
+      if (!knownDocuments.has(mention)) {
+        continue;
+      }
+      const documentId = `document:${mention}`;
+      links.push({
+        id: `mention:${eventName}:${mention}`,
+        source: documentId,
+        target: eventId,
+        linkKind: "mention"
+      });
+
+      const eventIndices = documentEventMap.get(mention) ?? new Set<number>();
+      eventIndices.add(eventIndex);
+      documentEventMap.set(mention, eventIndices);
+    }
+  }
+
+  for (const [characterName, characterValue] of Object.entries(charactersRecord)) {
+    const character = asRecord(characterValue);
+    const connected = getConnectedEventStats(characterEventMap.get(characterName), eventEntries.length);
+    nodes.push({
+      id: `character:${characterName}`,
+      name: characterName,
+      nodeKind: "character",
+      mentions: toUniqueStrings(asStringArray(character["mentions"])),
+      connectedEventSpan: connected.span,
+      connectedEventCount: connected.count,
+      meanEventIndex: connected.meanIndex,
+      characterType: asOptionalString(character["type"]) ?? "Unknown",
+      bio: asOptionalString(character["biography"]) ?? ""
+    });
+  }
+
+  for (const documentName of documentOrder) {
+    const connected = getConnectedEventStats(documentEventMap.get(documentName), eventEntries.length);
+    nodes.push({
+      id: `document:${documentName}`,
+      name: documentName,
+      nodeKind: "document",
+      mentions: [documentName],
+      connectedEventSpan: connected.span,
+      connectedEventCount: connected.count,
+      meanEventIndex: connected.meanIndex
+    });
+  }
+
+  return {
+    nodes,
+    links,
+    sourceLabel
+  };
+}
+
+function getTimelineDashboardHtml(graph: TimelineGraphData): string {
+  const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const title = `Timeline (${graph.sourceLabel})`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-editor-foreground);
+      font-family: var(--vscode-font-family);
+      overflow: hidden;
+    }
+    .root {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      width: 100%;
+      height: 100%;
+    }
+    .header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      font-size: 13px;
+      color: var(--vscode-descriptionForeground);
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+      cursor: default;
+    }
+    .tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 420px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      color: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      display: none;
+      font-size: 12px;
+    }
+    .legend {
+      position: fixed;
+      left: 14px;
+      bottom: 14px;
+      z-index: 100;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editorWidget-background);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      max-width: min(40vw, 420px);
+      max-height: 45vh;
+      overflow: auto;
+    }
+    .legend-title {
+      margin: 8px 0 6px 0;
+      color: var(--vscode-descriptionForeground);
+    }
+    .legend-title:first-child {
+      margin-top: 0;
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="root">
+    <div class="header">${escapeHtml(title)} - drag nodes to inspect local structure; the event backbone auto-snaps into timeline order.</div>
+    <svg id="graph"></svg>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <div id="legend" class="legend"></div>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script>
+    const graph = ${graphJson};
+    const svg = d3.select('#graph');
+    const tooltip = document.getElementById('tooltip');
+    const legend = document.getElementById('legend');
+    const aspect = 0.5;
+    let width = 0;
+    let height = 0;
+    let dragging = false;
+    let backboneY = 0;
+    let backboneDx = 150;
+    let backboneStartX = 0;
+    const anchorById = new Map();
+
+    const eventNodes = graph.nodes
+      .filter((node) => node.nodeKind === 'event')
+      .sort((a, b) => (a.eventIndex || 0) - (b.eventIndex || 0));
+    const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
+    const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
+    const nonEventNodes = graph.nodes.filter((node) => node.nodeKind !== 'event');
+    const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+
+    const types = Array.from(new Set(characterNodes.map((node) => node.characterType || 'Unknown'))).sort();
+    if (types.length === 0) {
+      types.push('Unknown');
+    }
+    const palette = [...d3.schemeTableau10, ...d3.schemeSet3];
+    const characterColor = d3.scaleOrdinal(types, palette);
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function setSize() {
+      const rect = document.body.getBoundingClientRect();
+      width = Math.max(420, rect.width);
+      height = Math.max(320, rect.height - 42);
+      svg.attr('viewBox', [0, 0, width, height]);
+    }
+
+    function updateTargets() {
+      backboneY = height / 2;
+      const eventCount = eventNodes.length;
+      if (eventCount <= 1) {
+        backboneDx = Math.max(64, Math.min(140, width * 0.35));
+        backboneStartX = width / 2;
+      } else {
+        const margin = clamp(width * 0.12, 72, 180);
+        backboneStartX = margin;
+        backboneDx = (width - margin * 2) / (eventCount - 1);
+      }
+
+      anchorById.clear();
+      for (const eventNode of eventNodes) {
+        const index = Number.isFinite(eventNode.eventIndex) ? eventNode.eventIndex : 0;
+        const x = eventCount <= 1 ? width / 2 : backboneStartX + index * backboneDx;
+        anchorById.set(eventNode.id, { x, y: backboneY });
+      }
+
+      const centerIndex = eventCount <= 1 ? 0 : (eventCount - 1) / 2;
+      for (const node of graph.nodes) {
+        if (node.nodeKind === 'event') {
+          const anchor = anchorById.get(node.id) || { x: width / 2, y: backboneY };
+          node.targetX = anchor.x;
+          node.targetY = anchor.y;
+        } else {
+          const isDisconnected = !Number.isFinite(node.connectedEventCount) || node.connectedEventCount <= 0;
+          if (isDisconnected) {
+            const firstBackboneNode = eventNodes.length > 0 ? eventNodes[0] : undefined;
+            const firstAnchor = firstBackboneNode ? anchorById.get(firstBackboneNode.id) : undefined;
+            node.targetX = firstAnchor ? firstAnchor.x : width / 2;
+            const yOffset = 2 * backboneDx * aspect;
+            node.targetY = node.nodeKind === 'character' ? backboneY - yOffset : backboneY + yOffset;
+          } else {
+            const meanIndex = Number.isFinite(node.meanEventIndex) ? node.meanEventIndex : centerIndex;
+            node.targetX = eventCount <= 1 ? width / 2 : backboneStartX + meanIndex * backboneDx;
+            const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
+            const yOffset = (span + 1) * backboneDx * aspect;
+            node.targetY = node.nodeKind === 'character' ? backboneY - yOffset : backboneY + yOffset;
+          }
+        }
+
+        if (!Number.isFinite(node.x)) {
+          node.x = node.targetX;
+        }
+        if (!Number.isFinite(node.y)) {
+          node.y = node.targetY;
+        }
+      }
+    }
+
+    function nodeFill(node) {
+      if (node.nodeKind === 'event') {
+        return '#d7a12f';
+      }
+      if (node.nodeKind === 'character') {
+        return characterColor(node.characterType || 'Unknown');
+      }
+      return '#5d92c9';
+    }
+
+    function nodeRadius(node) {
+      if (node.nodeKind === 'event') {
+        return 8.8;
+      }
+      if (node.nodeKind === 'character') {
+        return 8.2;
+      }
+      return 7.6;
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+      tooltip.textContent = '';
+    }
+
+    function positionTooltip(event) {
+      const offset = 14;
+      const maxX = window.innerWidth - tooltip.offsetWidth - 8;
+      const maxY = window.innerHeight - tooltip.offsetHeight - 8;
+      const x = Math.min(maxX, event.clientX + offset);
+      const y = Math.min(maxY, event.clientY + offset);
+      tooltip.style.left = Math.max(8, x) + 'px';
+      tooltip.style.top = Math.max(8, y) + 'px';
+    }
+
+    function showTooltip(event, rows) {
+      tooltip.textContent = rows.filter(Boolean).join('\\n');
+      tooltip.style.display = 'block';
+      positionTooltip(event);
+    }
+
+    function formatMentions(mentions) {
+      if (!Array.isArray(mentions) || mentions.length === 0) {
+        return '(none)';
+      }
+      return mentions.join(', ');
+    }
+
+    function renderLegend() {
+      legend.innerHTML = '';
+
+      const nodeKindsTitle = document.createElement('div');
+      nodeKindsTitle.className = 'legend-title';
+      nodeKindsTitle.textContent = 'Node Kind';
+      legend.appendChild(nodeKindsTitle);
+
+      const nodeKindRows = [
+        { label: 'Event', color: '#d7a12f' },
+        { label: 'Character', color: '#808080' },
+        { label: 'Document', color: '#5d92c9' }
+      ];
+      for (const item of nodeKindRows) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = item.color;
+        const label = document.createElement('span');
+        label.textContent = item.label;
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legend.appendChild(row);
+      }
+
+      const typeTitle = document.createElement('div');
+      typeTitle.className = 'legend-title';
+      typeTitle.textContent = 'Character Type';
+      legend.appendChild(typeTitle);
+
+      for (const type of types) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = characterColor(type);
+        const label = document.createElement('span');
+        label.textContent = type;
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legend.appendChild(row);
+      }
+    }
+
+    setSize();
+    updateTargets();
+    renderLegend();
+
+    const container = svg.append('g');
+    const backboneLayer = container.append('g');
+    const linkLayer = container.append('g');
+    const nodeLayer = container.append('g');
+    const labelLayer = container.append('g');
+
+    const backbone = backboneLayer.append('line')
+      .attr('stroke', '#7b7b7b')
+      .attr('stroke-width', 1.4)
+      .attr('stroke-dasharray', '6 4')
+      .attr('stroke-linecap', 'round');
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.2, 3.5])
+      .on('zoom', (event) => {
+        container.attr('transform', event.transform);
+        hideTooltip();
+      });
+    svg.call(zoom);
+
+    function linkEndId(linkEnd) {
+      return typeof linkEnd === 'string' ? linkEnd : linkEnd.id;
+    }
+
+    const link = linkLayer
+      .selectAll('line')
+      .data(graph.links, (d) => d.id)
+      .join('line')
+      .attr('stroke', (d) => (d.linkKind === 'party' ? '#7a7a7a' : '#6f85a1'))
+      .attr('stroke-opacity', 0.68)
+      .attr('stroke-width', 1.4)
+      .on('mouseover', (event, d) => {
+        if (dragging) return;
+        const sourceId = linkEndId(d.source);
+        const targetId = linkEndId(d.target);
+        const sourceName = nodeById.get(sourceId)?.name || sourceId;
+        const targetName = nodeById.get(targetId)?.name || targetId;
+        showTooltip(event, [
+          d.linkKind === 'party' ? 'Character Participation' : 'Document Mention',
+          sourceName + ' -> ' + targetName
+        ]);
+      })
+      .on('mousemove', (event) => {
+        if (dragging || tooltip.style.display !== 'block') return;
+        positionTooltip(event);
+      })
+      .on('mouseout', hideTooltip);
+
+    const node = nodeLayer
+      .selectAll('circle')
+      .data(graph.nodes, (d) => d.id)
+      .join('circle')
+      .attr('r', (d) => nodeRadius(d))
+      .attr('fill', (d) => nodeFill(d))
+      .attr('stroke', 'rgba(0,0,0,0.45)')
+      .attr('stroke-width', 1)
+      .on('mouseover', (event, d) => {
+        if (dragging) return;
+        if (d.nodeKind === 'event') {
+          showTooltip(event, [
+            d.name,
+            d.date ? 'Date: ' + d.date : 'Date: (unknown)',
+            d.summary ? 'Summary: ' + d.summary : 'Summary: (none)',
+            'Mentions: ' + formatMentions(d.mentions)
+          ]);
+          return;
+        }
+
+        if (d.nodeKind === 'character') {
+          showTooltip(event, [
+            d.name,
+            d.characterType ? 'Type: ' + d.characterType : 'Type: Unknown',
+            'Connected event span: ' + (d.connectedEventSpan + 1),
+            d.bio ? 'Bio: ' + d.bio : 'Bio: (none)',
+            'Mentions: ' + formatMentions(d.mentions)
+          ]);
+          return;
+        }
+
+        showTooltip(event, [
+          d.name,
+          'Connected event span: ' + (d.connectedEventSpan + 1),
+          'Linked events: ' + d.connectedEventCount
+        ]);
+      })
+      .on('mousemove', (event) => {
+        if (dragging || tooltip.style.display !== 'block') return;
+        positionTooltip(event);
+      })
+      .on('mouseout', hideTooltip);
+
+    const nonEventLabels = labelLayer
+      .selectAll('text.non-event')
+      .data(nonEventNodes, (d) => d.id)
+      .join('text')
+      .attr('class', 'non-event')
+      .attr('font-size', 11)
+      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('dominant-baseline', 'middle')
+      .attr('pointer-events', 'none')
+      .text((d) => d.name);
+
+    const eventLabels = labelLayer
+      .selectAll('text.event')
+      .data(eventNodes, (d) => d.id)
+      .join('text')
+      .attr('class', 'event')
+      .attr('font-size', 11)
+      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('dominant-baseline', 'hanging')
+      .attr('pointer-events', 'none')
+      .text((d) => d.name);
+
+    const linkForce = d3.forceLink(graph.links)
+      .id((d) => d.id)
+      .distance((d) => (d.linkKind === 'party' ? Math.max(28, backboneDx * 0.9) : Math.max(24, backboneDx * 0.8)))
+      .strength(0.08);
+
+    const simulation = d3.forceSimulation(graph.nodes)
+      .velocityDecay(0.45)
+      .force('link', linkForce)
+      .force(
+        'x',
+        d3.forceX((d) => d.targetX).strength((d) => (d.nodeKind === 'event' ? 0.95 : 0.24))
+      )
+      .force(
+        'y',
+        d3.forceY((d) => d.targetY).strength((d) => (d.nodeKind === 'event' ? 0.95 : 0.24))
+      )
+      .force(
+        'characterRepel',
+        d3.forceManyBody().strength((d) => (d.nodeKind === 'character' ? -20 : 0)).distanceMax(260)
+      )
+      .force(
+        'documentRepel',
+        d3.forceManyBody().strength((d) => (d.nodeKind === 'document' ? -20 : 0)).distanceMax(260)
+      )
+      .force('collision', d3.forceCollide((d) => nodeRadius(d) + 3).strength(0.85))
+      .on('tick', () => {
+        const startX = eventNodes.length <= 1 ? width / 2 : backboneStartX;
+        const endX =
+          eventNodes.length <= 1
+            ? width / 2
+            : backboneStartX + Math.max(0, eventNodes.length - 1) * backboneDx;
+
+        backbone
+          .attr('x1', startX)
+          .attr('y1', backboneY)
+          .attr('x2', endX)
+          .attr('y2', backboneY);
+
+        link
+          .attr('x1', (d) => d.source.x)
+          .attr('y1', (d) => d.source.y)
+          .attr('x2', (d) => d.target.x)
+          .attr('y2', (d) => d.target.y);
+
+        node
+          .attr('cx', (d) => d.x)
+          .attr('cy', (d) => d.y);
+
+        nonEventLabels
+          .attr('x', (d) => d.x + 10)
+          .attr('y', (d) => d.y);
+
+        eventLabels.attr('transform', (d) => {
+          const labelY = Math.max(backboneY + 14, d.y + 10);
+          return 'translate(' + (d.x + 8) + ',' + labelY + ') rotate(45)';
+        });
+      });
+
+    window.addEventListener('resize', () => {
+      setSize();
+      updateTargets();
+      linkForce.distance((d) => (d.linkKind === 'party' ? Math.max(28, backboneDx * 0.9) : Math.max(24, backboneDx * 0.8)));
+      simulation.alpha(0.7).restart();
+      hideTooltip();
+    });
+
+    const drag = d3.drag()
+      .on('start', (event, d) => {
+        dragging = true;
+        hideTooltip();
+        if (!event.active) simulation.alphaTarget(0.32).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
@@ -1677,6 +2512,78 @@ function asStringArray(value: unknown): string[] {
   return value
     .map((item) => asOptionalString(item))
     .filter((item): item is string => typeof item === "string");
+}
+
+function normalizeDocumentReference(reference: string): string | undefined {
+  const normalized = reference
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\.?\//, "")
+    .replace(/^Manuscript\//i, "");
+  return normalized || undefined;
+}
+
+async function listManuscriptDocuments(manuscriptDirPath: string): Promise<string[]> {
+  if (!(await pathExists(manuscriptDirPath))) {
+    return [];
+  }
+
+  const documents: string[] = [];
+  await collectManuscriptDocumentsRecursively(manuscriptDirPath, manuscriptDirPath, documents);
+  documents.sort((a, b) => a.localeCompare(b));
+  return documents;
+}
+
+async function collectManuscriptDocumentsRecursively(
+  currentDirPath: string,
+  rootDirPath: string,
+  output: string[]
+): Promise<void> {
+  const entries = await fs.readdir(currentDirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(currentDirPath, entry.name);
+    if (entry.isDirectory()) {
+      await collectManuscriptDocumentsRecursively(entryPath, rootDirPath, output);
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const relativePath = path.relative(rootDirPath, entryPath).split(path.sep).join("/");
+    const normalized = normalizeDocumentReference(relativePath);
+    if (normalized) {
+      output.push(normalized);
+    }
+  }
+}
+
+function toUniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function getConnectedEventStats(
+  connectedEventIndices: ReadonlySet<number> | undefined,
+  eventCount: number
+): { span: number; count: number; meanIndex: number } {
+  if (!connectedEventIndices || connectedEventIndices.size === 0) {
+    return {
+      span: 0,
+      count: 0,
+      meanIndex: eventCount > 1 ? (eventCount - 1) / 2 : 0
+    };
+  }
+
+  const sorted = Array.from(connectedEventIndices).sort((a, b) => a - b);
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const meanIndex = sorted.reduce((sum, item) => sum + item, 0) / sorted.length;
+
+  return {
+    span: Math.max(0, last - first),
+    count: sorted.length,
+    meanIndex
+  };
 }
 
 function escapeHtml(value: string): string {
