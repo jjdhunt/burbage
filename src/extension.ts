@@ -512,7 +512,6 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .attr('stroke-opacity', defaultLinkOpacity)
       .on('mouseover', (event, d) => {
         if (dragging) return;
-        highlightRelationshipLink(d.id);
         showTooltip(event, [
           'Relationship: ' + d.relationshipType,
           'Formation: ' + d.formation,
@@ -525,10 +524,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', () => {
-        hideTooltip();
-        resetRelationshipLinkHighlight();
-      });
+      .on('mouseout', hideTooltip);
 
     const node = nodeLayer
       .selectAll('circle')
@@ -540,7 +536,6 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .attr('stroke-width', 1)
       .on('mouseover', (event, d) => {
         if (dragging) return;
-        highlightRelationshipLinksForNode(d.id);
         showTooltip(event, [
           d.name,
           d.type ? 'Type: ' + d.type : '',
@@ -552,21 +547,12 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', () => {
-        hideTooltip();
-        resetRelationshipLinkHighlight();
-      });
+      .on('mouseout', hideTooltip);
 
     function resetRelationshipLinkHighlight() {
       link
         .attr('stroke-opacity', defaultLinkOpacity)
         .attr('stroke-width', defaultLinkWidth);
-    }
-
-    function highlightRelationshipLink(linkId) {
-      link
-        .attr('stroke-opacity', (d) => (d.id === linkId ? highlightedLinkOpacity : dimmedLinkOpacity))
-        .attr('stroke-width', (d) => (d.id === linkId ? highlightedLinkWidth : dimmedLinkWidth));
     }
 
     function highlightRelationshipLinksForNode(nodeId) {
@@ -620,14 +606,14 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .on('start', (event, d) => {
         dragging = true;
         hideTooltip();
-        resetRelationshipLinkHighlight();
+        highlightRelationshipLinksForNode(d.id);
         if (!event.active) simulation.alphaTarget(0.3).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
       .on('drag', (event, d) => {
         hideTooltip();
-        resetRelationshipLinkHighlight();
+        highlightRelationshipLinksForNode(d.id);
         d.fx = event.x;
         d.fy = event.y;
       })
@@ -1058,8 +1044,8 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     let backboneY = 0;
     let backboneDx = 150;
     let backboneStartX = 0;
-    const backboneDxScale = 2.5;
-    const eventAnchorStrength = 10.0;
+    const backboneDxScale = 1.5;
+    const eventAnchorStrength = 5.0;
     const anchorById = new Map();
 
     const eventNodes = graph.nodes
@@ -1117,6 +1103,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
           const anchor = anchorById.get(node.id) || { x: width / 2, y: backboneY };
           node.targetX = anchor.x;
           node.targetY = anchor.y;
+          node.fy = backboneY;
         } else {
           const isDisconnected = !Number.isFinite(node.connectedEventCount) || node.connectedEventCount <= 0;
           if (isDisconnected) {
@@ -1261,7 +1248,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
 
     const container = svg.append('g');
     const backboneEdgeLayer = container.append('g');
-    const linkLayer = container.append('g');
+    const linkLayer = container.append('g').attr('fill', 'none');
     const nodeLayer = container.append('g');
     const labelLayer = container.append('g');
     const defaultTimelineLinkOpacity = 0.68;
@@ -1300,16 +1287,48 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       return typeof linkEnd === 'string' ? linkEnd : linkEnd.id;
     }
 
+    function timelineLinkPath(linkDatum) {
+      const sourceNode = typeof linkDatum.source === 'string' ? nodeById.get(linkDatum.source) : linkDatum.source;
+      const targetNode = typeof linkDatum.target === 'string' ? nodeById.get(linkDatum.target) : linkDatum.target;
+      if (!sourceNode || !targetNode) {
+        return '';
+      }
+
+      const sourceIsEvent = sourceNode.nodeKind === 'event';
+      const targetIsEvent = targetNode.nodeKind === 'event';
+      if (sourceIsEvent === targetIsEvent) {
+        return 'M' + sourceNode.x + ',' + sourceNode.y + 'L' + targetNode.x + ',' + targetNode.y;
+      }
+
+      const eventNode = sourceIsEvent ? sourceNode : targetNode;
+      const entityNode = sourceIsEvent ? targetNode : sourceNode;
+      const direction = entityNode.y < eventNode.y ? -1 : 1;
+      const eventRadius = nodeRadius(eventNode);
+      const startX = eventNode.x;
+      const startY = eventNode.y + direction * (eventRadius + 1);
+      const endX = entityNode.x;
+      const endY = entityNode.y;
+      const deltaY = Math.max(24, Math.abs(endY - startY));
+      const controlDelta = Math.max(16, Math.min(170, deltaY * 0.44));
+      const control1X = startX;
+      const control1Y = startY + direction * controlDelta;
+      const control2X = endX;
+      const control2Y = endY - direction * Math.min(140, Math.max(14, deltaY * 0.36));
+      return (
+        'M' + startX + ',' + startY +
+        'C' + control1X + ',' + control1Y + ' ' + control2X + ',' + control2Y + ' ' + endX + ',' + endY
+      );
+    }
+
     const link = linkLayer
-      .selectAll('line')
+      .selectAll('path')
       .data(graph.links, (d) => d.id)
-      .join('line')
+      .join('path')
       .attr('stroke', (d) => (d.linkKind === 'party' ? '#7a7a7a' : '#6f85a1'))
       .attr('stroke-opacity', defaultTimelineLinkOpacity)
       .attr('stroke-width', defaultTimelineLinkWidth)
       .on('mouseover', (event, d) => {
         if (dragging) return;
-        highlightTimelineLink(d.id);
         const sourceId = linkEndId(d.source);
         const targetId = linkEndId(d.target);
         const sourceName = nodeById.get(sourceId)?.name || sourceId;
@@ -1323,10 +1342,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', () => {
-        hideTooltip();
-        resetTimelineConnectionHighlight();
-      });
+      .on('mouseout', hideTooltip);
 
     const node = nodeLayer
       .selectAll('circle')
@@ -1338,7 +1354,6 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .attr('stroke-width', 1)
       .on('mouseover', (event, d) => {
         if (dragging) return;
-        highlightTimelineConnectionsForNode(d.id);
         if (d.nodeKind === 'event') {
           showTooltip(event, [
             d.name,
@@ -1370,10 +1385,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', () => {
-        hideTooltip();
-        resetTimelineConnectionHighlight();
-      });
+      .on('mouseout', hideTooltip);
 
     function resetTimelineConnectionHighlight() {
       link
@@ -1381,15 +1393,6 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         .attr('stroke-width', defaultTimelineLinkWidth);
       backboneEdge
         .attr('stroke-opacity', defaultBackboneOpacity)
-        .attr('stroke-width', defaultBackboneWidth);
-    }
-
-    function highlightTimelineLink(linkId) {
-      link
-        .attr('stroke-opacity', (d) => (d.id === linkId ? highlightedTimelineLinkOpacity : dimmedTimelineLinkOpacity))
-        .attr('stroke-width', (d) => (d.id === linkId ? highlightedTimelineLinkWidth : dimmedTimelineLinkWidth));
-      backboneEdge
-        .attr('stroke-opacity', dimmedBackboneOpacity)
         .attr('stroke-width', defaultBackboneWidth);
     }
 
@@ -1477,10 +1480,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
           .attr('y2', (d) => d.target.y);
 
         link
-          .attr('x1', (d) => d.source.x)
-          .attr('y1', (d) => d.source.y)
-          .attr('x2', (d) => d.target.x)
-          .attr('y2', (d) => d.target.y);
+          .attr('d', (d) => timelineLinkPath(d));
 
         node
           .attr('cx', (d) => d.x)
@@ -1514,16 +1514,16 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .on('start', (event, d) => {
         dragging = true;
         hideTooltip();
-        resetTimelineConnectionHighlight();
+        highlightTimelineConnectionsForNode(d.id);
         if (!event.active) simulation.alphaTarget(0.32).restart();
         d.fx = d.x;
-        d.fy = d.y;
+        d.fy = d.nodeKind === 'event' ? backboneY : d.y;
       })
       .on('drag', (event, d) => {
         hideTooltip();
-        resetTimelineConnectionHighlight();
+        highlightTimelineConnectionsForNode(d.id);
         d.fx = event.x;
-        d.fy = event.y;
+        d.fy = d.nodeKind === 'event' ? backboneY : event.y;
       })
       .on('end', (event, d) => {
         dragging = false;
@@ -1531,7 +1531,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         resetTimelineConnectionHighlight();
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
-        d.fy = null;
+        d.fy = d.nodeKind === 'event' ? backboneY : null;
       });
 
     node.call(drag);
