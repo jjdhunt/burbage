@@ -484,22 +484,35 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
     const linkLayer = container.append('g').attr('stroke', '#7a7a7a').attr('stroke-opacity', 0.7);
     const nodeLayer = container.append('g');
     const labelLayer = container.append('g');
+    const defaultLinkOpacity = 0.7;
+    const defaultLinkWidth = 1.8;
+    const dimmedLinkOpacity = 0.14;
+    const dimmedLinkWidth = 1.2;
+    const highlightedLinkOpacity = 1;
+    const highlightedLinkWidth = 2.9;
 
     const zoom = d3.zoom()
       .scaleExtent([0.2, 3.5])
       .on('zoom', (event) => {
         container.attr('transform', event.transform);
         hideTooltip();
+        resetRelationshipLinkHighlight();
       });
     svg.call(zoom);
+
+    function linkEndId(linkEnd) {
+      return typeof linkEnd === 'string' ? linkEnd : linkEnd.id;
+    }
 
     const link = linkLayer
       .selectAll('line')
       .data(graph.links, (d) => d.id)
       .join('line')
-      .attr('stroke-width', 1.8)
+      .attr('stroke-width', defaultLinkWidth)
+      .attr('stroke-opacity', defaultLinkOpacity)
       .on('mouseover', (event, d) => {
         if (dragging) return;
+        highlightRelationshipLink(d.id);
         showTooltip(event, [
           'Relationship: ' + d.relationshipType,
           'Formation: ' + d.formation,
@@ -512,7 +525,10 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', hideTooltip);
+      .on('mouseout', () => {
+        hideTooltip();
+        resetRelationshipLinkHighlight();
+      });
 
     const node = nodeLayer
       .selectAll('circle')
@@ -524,6 +540,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .attr('stroke-width', 1)
       .on('mouseover', (event, d) => {
         if (dragging) return;
+        highlightRelationshipLinksForNode(d.id);
         showTooltip(event, [
           d.name,
           d.type ? 'Type: ' + d.type : '',
@@ -535,7 +552,36 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', hideTooltip);
+      .on('mouseout', () => {
+        hideTooltip();
+        resetRelationshipLinkHighlight();
+      });
+
+    function resetRelationshipLinkHighlight() {
+      link
+        .attr('stroke-opacity', defaultLinkOpacity)
+        .attr('stroke-width', defaultLinkWidth);
+    }
+
+    function highlightRelationshipLink(linkId) {
+      link
+        .attr('stroke-opacity', (d) => (d.id === linkId ? highlightedLinkOpacity : dimmedLinkOpacity))
+        .attr('stroke-width', (d) => (d.id === linkId ? highlightedLinkWidth : dimmedLinkWidth));
+    }
+
+    function highlightRelationshipLinksForNode(nodeId) {
+      link
+        .attr('stroke-opacity', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedLinkOpacity : dimmedLinkOpacity;
+        })
+        .attr('stroke-width', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedLinkWidth : dimmedLinkWidth;
+        });
+    }
 
     const nodeLabel = labelLayer
       .selectAll('text')
@@ -574,18 +620,21 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData): string {
       .on('start', (event, d) => {
         dragging = true;
         hideTooltip();
+        resetRelationshipLinkHighlight();
         if (!event.active) simulation.alphaTarget(0.3).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
       .on('drag', (event, d) => {
         hideTooltip();
+        resetRelationshipLinkHighlight();
         d.fx = event.x;
         d.fy = event.y;
       })
       .on('end', (event, d) => {
         dragging = false;
         hideTooltip();
+        resetRelationshipLinkHighlight();
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
         d.fy = null;
@@ -1215,14 +1264,25 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     const linkLayer = container.append('g');
     const nodeLayer = container.append('g');
     const labelLayer = container.append('g');
+    const defaultTimelineLinkOpacity = 0.68;
+    const defaultTimelineLinkWidth = 1.4;
+    const dimmedTimelineLinkOpacity = 0.12;
+    const dimmedTimelineLinkWidth = 1.0;
+    const highlightedTimelineLinkOpacity = 1;
+    const highlightedTimelineLinkWidth = 2.6;
+    const defaultBackboneOpacity = 0.85;
+    const defaultBackboneWidth = 1.6;
+    const dimmedBackboneOpacity = 0.2;
+    const highlightedBackboneOpacity = 1;
+    const highlightedBackboneWidth = 2.4;
 
     const backboneEdge = backboneEdgeLayer
       .selectAll('line')
       .data(eventBackboneLinks, (d) => d.id)
       .join('line')
       .attr('stroke', '#7b7b7b')
-      .attr('stroke-opacity', 0.85)
-      .attr('stroke-width', 1.6)
+      .attr('stroke-opacity', defaultBackboneOpacity)
+      .attr('stroke-width', defaultBackboneWidth)
       .attr('stroke-linecap', 'round')
       .attr('marker-end', 'url(#' + backboneMarkerId + ')')
       .attr('pointer-events', 'none');
@@ -1232,6 +1292,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .on('zoom', (event) => {
         container.attr('transform', event.transform);
         hideTooltip();
+        resetTimelineConnectionHighlight();
       });
     svg.call(zoom);
 
@@ -1244,10 +1305,11 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .data(graph.links, (d) => d.id)
       .join('line')
       .attr('stroke', (d) => (d.linkKind === 'party' ? '#7a7a7a' : '#6f85a1'))
-      .attr('stroke-opacity', 0.68)
-      .attr('stroke-width', 1.4)
+      .attr('stroke-opacity', defaultTimelineLinkOpacity)
+      .attr('stroke-width', defaultTimelineLinkWidth)
       .on('mouseover', (event, d) => {
         if (dragging) return;
+        highlightTimelineLink(d.id);
         const sourceId = linkEndId(d.source);
         const targetId = linkEndId(d.target);
         const sourceName = nodeById.get(sourceId)?.name || sourceId;
@@ -1261,7 +1323,10 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', hideTooltip);
+      .on('mouseout', () => {
+        hideTooltip();
+        resetTimelineConnectionHighlight();
+      });
 
     const node = nodeLayer
       .selectAll('circle')
@@ -1273,6 +1338,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .attr('stroke-width', 1)
       .on('mouseover', (event, d) => {
         if (dragging) return;
+        highlightTimelineConnectionsForNode(d.id);
         if (d.nodeKind === 'event') {
           showTooltip(event, [
             d.name,
@@ -1304,7 +1370,46 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         if (dragging || tooltip.style.display !== 'block') return;
         positionTooltip(event);
       })
-      .on('mouseout', hideTooltip);
+      .on('mouseout', () => {
+        hideTooltip();
+        resetTimelineConnectionHighlight();
+      });
+
+    function resetTimelineConnectionHighlight() {
+      link
+        .attr('stroke-opacity', defaultTimelineLinkOpacity)
+        .attr('stroke-width', defaultTimelineLinkWidth);
+      backboneEdge
+        .attr('stroke-opacity', defaultBackboneOpacity)
+        .attr('stroke-width', defaultBackboneWidth);
+    }
+
+    function highlightTimelineLink(linkId) {
+      link
+        .attr('stroke-opacity', (d) => (d.id === linkId ? highlightedTimelineLinkOpacity : dimmedTimelineLinkOpacity))
+        .attr('stroke-width', (d) => (d.id === linkId ? highlightedTimelineLinkWidth : dimmedTimelineLinkWidth));
+      backboneEdge
+        .attr('stroke-opacity', dimmedBackboneOpacity)
+        .attr('stroke-width', defaultBackboneWidth);
+    }
+
+    function highlightTimelineConnectionsForNode(nodeId) {
+      link
+        .attr('stroke-opacity', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedTimelineLinkOpacity : dimmedTimelineLinkOpacity;
+        })
+        .attr('stroke-width', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedTimelineLinkWidth : dimmedTimelineLinkWidth;
+        });
+
+      backboneEdge
+        .attr('stroke-opacity', (d) => (d.source.id === nodeId || d.target.id === nodeId ? highlightedBackboneOpacity : dimmedBackboneOpacity))
+        .attr('stroke-width', (d) => (d.source.id === nodeId || d.target.id === nodeId ? highlightedBackboneWidth : defaultBackboneWidth));
+    }
 
     const characterLabels = labelLayer
       .selectAll('text.character')
@@ -1402,24 +1507,28 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       linkForce.distance((d) => (d.linkKind === 'party' ? Math.max(28, backboneDx * 0.9) : Math.max(24, backboneDx * 0.8)));
       simulation.alpha(0.7).restart();
       hideTooltip();
+      resetTimelineConnectionHighlight();
     });
 
     const drag = d3.drag()
       .on('start', (event, d) => {
         dragging = true;
         hideTooltip();
+        resetTimelineConnectionHighlight();
         if (!event.active) simulation.alphaTarget(0.32).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
       .on('drag', (event, d) => {
         hideTooltip();
+        resetTimelineConnectionHighlight();
         d.fx = event.x;
         d.fy = event.y;
       })
       .on('end', (event, d) => {
         dragging = false;
         hideTooltip();
+        resetTimelineConnectionHighlight();
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
         d.fy = null;
