@@ -1009,7 +1009,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     let backboneY = 0;
     let backboneDx = 150;
     let backboneStartX = 0;
-    const backboneDxScale = 3.0;
+    const backboneDxScale = 2.5;
     const eventAnchorStrength = 10.0;
     const anchorById = new Map();
 
@@ -1023,7 +1023,6 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     }));
     const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
     const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
-    const nonEventNodes = graph.nodes.filter((node) => node.nodeKind !== 'event');
     const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 
     const types = Array.from(new Set(characterNodes.map((node) => node.characterType || 'Unknown'))).sort();
@@ -1074,15 +1073,21 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
           if (isDisconnected) {
             const firstBackboneNode = eventNodes.length > 0 ? eventNodes[0] : undefined;
             const firstAnchor = firstBackboneNode ? anchorById.get(firstBackboneNode.id) : undefined;
-            node.targetX = firstAnchor ? firstAnchor.x : width / 2;
-            const yOffset = 2 * backboneDx * aspect;
-            node.targetY = node.nodeKind === 'character' ? backboneY - yOffset : backboneY + yOffset;
+            node.targetX = (firstAnchor ? firstAnchor.x : width / 2) - 2 * backboneDx;
+            if (node.nodeKind === 'character') {
+              const yOffset = 2 * backboneDx * aspect;
+              node.targetY = backboneY - yOffset;
+            } else {
+              const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
+              const spanOffset = (span + 1) * backboneDx * aspect;
+              node.targetY = backboneY + 2 * backboneDx + spanOffset;
+            }
           } else {
             const meanIndex = Number.isFinite(node.meanEventIndex) ? node.meanEventIndex : centerIndex;
             node.targetX = eventCount <= 1 ? width / 2 : backboneStartX + meanIndex * backboneDx;
             const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
             const yOffset = (span + 1) * backboneDx * aspect;
-            node.targetY = node.nodeKind === 'character' ? backboneY - yOffset : backboneY + yOffset;
+            node.targetY = node.nodeKind === 'character' ? backboneY - yOffset : backboneY + 3 * backboneDx + yOffset;
           }
         }
 
@@ -1153,7 +1158,6 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
 
       const nodeKindRows = [
         { label: 'Event', color: '#d7a12f' },
-        { label: 'Character', color: '#808080' },
         { label: 'Document', color: '#5d92c9' }
       ];
       for (const item of nodeKindRows) {
@@ -1302,14 +1306,25 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       })
       .on('mouseout', hideTooltip);
 
-    const nonEventLabels = labelLayer
-      .selectAll('text.non-event')
-      .data(nonEventNodes, (d) => d.id)
+    const characterLabels = labelLayer
+      .selectAll('text.character')
+      .data(characterNodes, (d) => d.id)
       .join('text')
-      .attr('class', 'non-event')
+      .attr('class', 'character')
       .attr('font-size', 11)
       .attr('fill', 'var(--vscode-editor-foreground)')
       .attr('dominant-baseline', 'middle')
+      .attr('pointer-events', 'none')
+      .text((d) => d.name);
+
+    const documentLabels = labelLayer
+      .selectAll('text.document')
+      .data(documentNodes, (d) => d.id)
+      .join('text')
+      .attr('class', 'document')
+      .attr('font-size', 11)
+      .attr('fill', 'var(--vscode-editor-foreground)')
+      .attr('dominant-baseline', 'hanging')
       .attr('pointer-events', 'none')
       .text((d) => d.name);
 
@@ -1366,12 +1381,17 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
           .attr('cx', (d) => d.x)
           .attr('cy', (d) => d.y);
 
-        nonEventLabels
+        characterLabels
           .attr('x', (d) => d.x + 10)
           .attr('y', (d) => d.y);
 
+        documentLabels.attr('transform', (d) => {
+          const labelY = Math.max(backboneY + 8, d.y + 6);
+          return 'translate(' + (d.x + 8) + ',' + labelY + ') rotate(45)';
+        });
+
         eventLabels.attr('transform', (d) => {
-          const labelY = Math.max(backboneY + 14, d.y + 10);
+          const labelY = Math.max(backboneY + 8, d.y + 6);
           return 'translate(' + (d.x + 8) + ',' + labelY + ') rotate(45)';
         });
       });
