@@ -1,200 +1,204 @@
-# Burbage VS Code Extension Plan
+# Burbage Extension Handoff Plan
 
-## Product Direction
+## Purpose
 
-Burbage is a VS Code extension for structured text projects that keeps corpus-derived entities synchronized while providing an agentic assistant experience.
+Burbage is a VS Code extension for structured text projects (fiction or non-fiction corpora) that:
+- scaffolds a corpus + entity workspace,
+- runs an agentic assistant (Codex-backed) in a custom Burbage chat UI,
+- and visualizes entity structure (currently relationship graph).
 
-Supported project types include (not limited to):
-- Novels and long-form fiction.
-- News/article collections.
-- Research and intelligence corpora.
-- Historical document sets.
+Primary project dirs:
+- `Manuscript/` (source corpus)
+- `Entities/` (`characters.yaml`, `locations.yaml`, `events.yaml`, `relationships.yaml`)
 
-Current architecture decision:
-- Use Codex as the agent runtime for Burbage flows (rather than building a custom agent framework).
-- Have a separate direct-LLM path for non-agentic character chat.
+## Current Repo Snapshot (Ground Truth)
 
-## Core User Experience
+This section describes the current checked-in code state in this workspace.
 
-### 1. Project Setup Command
+- Extension entrypoint: `src/extension.ts`
+- Command contributions currently registered in `package.json`:
+  - `burbage.setup`
+  - `burbage.sync`
+  - `burbage.openChat`
+  - `burbage.loginCodex`
+  - `burbage.openRelationshipDashboard`
+- Sidebar view container exists (`burbage.sidebar` webview in activity bar).
+- Runtime dependency: `yaml` (packaged via `node_modules/yaml/**`).
 
-One setup command initializes a project in an additive, non-destructive way:
-- Create `Manuscript/` if missing.
-- Create `Entities/` if missing.
-- Create missing entity files:
+Important drift note:
+- Recent local iterations may have produced higher `.vsix` versions, but this repo currently reflects the command set above.
+- No `openTimelineDashboard` command exists in current `package.json` or `src/extension.ts`.
+
+## What Is Implemented
+
+### 1. Setup Command (`burbage.setup`)
+
+Behavior:
+- Creates missing:
+  - `Manuscript/`
+  - `Entities/`
+  - `.vscode/`
   - `Entities/characters.yaml`
   - `Entities/locations.yaml`
   - `Entities/events.yaml`
   - `Entities/relationships.yaml`
-- Initialize git repo if missing.
-- Create `AGENTS.md` from `AGENTS_burbage.md` if missing.
-- Create `.vscode/settings.json` from `settings_burbage.json` if missing.
-
-Behavior constraints:
-- Never overwrite existing files silently.
-- Always replace `AGENTS.md` from template.
-- Never overwrite existing `.vscode/settings.json`.
-
-### 2. Agentic Chat
-
-- Extension provides a Burbage-branded chat UI.
-- Chat proxies to Codex.
-- This abstraction allows later chat-mode expansion (character personas, mixed tools, custom workflows).
-
-### 3. Entity Sync Model
-
-- Synchronization is based on working-tree change set (tracked + staged + untracked manuscript additions).
-- Sync can be triggered manually or from pre-commit hooks.
-- Pre-commit sync is advisory for now (no hard commit block in v1).
-
-### 4. Dashboards
-
-Webview panels for corpus intelligence views:
-- Character relationship network (force-directed graph).
-- Eventually other dashboards will be added (e.g. Event Timeline visualization).
-- Built with D3.js.
-
-### 5. Non-Agentic Character Chat
-
-- Character chat runs against direct LLM APIs (not Codex).
-- Keeps agentic editing and conversational roleplay paths separated.
-
-## Technical Architecture
-
-### Extension modules
-
-- `ProjectSetupService`
-  - Handles scaffolding, git init, templates, and safe file creation.
-
-- `AgentAdapter` (Codex-backed)
-  - Sends agentic tasks to Codex.
-  - Handles request/response translation for Burbage UI.
-
-- `LLMAdapter` (direct model chat)
-  - Handles provider auth + direct LLM calls for non-agentic character chat.
-
-- `EntitySyncService`
-  - Builds change set from git + untracked manuscript files.
-  - Runs sync/update actions for entity YAMLs.
-
-- `ChatUI`
-  - Burbage chat webview/sidebar.
-  - Session controls, mode switcher (agentic vs character chat).
-
-- `DashboardUI`
-  - D3 webviews for relationship graph.
-
-### Storage and config
-
-- Workspace content:
-  - `Manuscript/`
-  - `Entities/*.yaml`
+- Initializes git repo if `.git/` is missing.
+- Copies templates:
+  - `AGENTS_burbage.md` -> `AGENTS.md` (always replace)
+  - `settings_burbage.json` -> `.vscode/settings.json` (skip if exists)
+- Installs local Codex CLI into `.burbage/runtime` (npm-based).
+- Writes workspace Codex settings into `.vscode/settings.json`:
+  - `burbage.codexCliPath`
+  - `burbage.codexCliMode = "local"`
+- Ensures `.gitignore` entries:
+  - `.burbage/runtime/`
   - `AGENTS.md`
-  - `.vscode/settings.json`
+- Checks Codex login status and reports summary.
 
-- Secrets:
-  - Store API credentials via VS Code SecretStorage (never in repo files).
+### 2. Burbage Chat Sidebar
 
-### Codex dependency strategy
+Implemented in `BurbageSidebarProvider`:
+- Activity-bar webview chat with:
+  - Enter-to-send
+  - Shift+Enter newline
+  - `Sync` button (sends a default sync prompt)
+- Persistent Codex thread per sidebar lifecycle (`exec` then `exec resume`).
+- Streaming status shown as:
+  - `Burbage is working...`
+  - plus recent progress lines (tool-call noise filtered).
+- Working status message is shown in transcript and replaced by final reply.
+- Queueing logic for concurrent user prompts while Codex is busy.
 
-- Prefer explicit user-consent install flow.
-- On activation/setup:
-  - detect Codex availability
-  - if missing, prompt user to install or guide through install steps
-- Avoid silent background install.
+### 3. Codex Integration
 
-### Command Surface (MVP)
+Implemented:
+- Local Codex command resolution priority:
+  1. workspace setting `burbage.codexCliPath`
+  2. local runtime `.burbage/runtime/node_modules/.bin/codex(.cmd)`
+  3. global `codex` / `codex.cmd`
+- Login support:
+  - `burbage.loginCodex` opens terminal and runs `codex login`.
+  - login verification via `codex login status`.
+- Command execution:
+  - JSON event parsing for thread id and assistant messages.
+  - streaming runner for progress/status updates.
 
-- `burbage.setup`
-  - Additive project initialization/scaffolding.
+Current behavior note:
+- Agent runs with `--dangerously-bypass-approvals-and-sandbox` for project-wide edits.
 
-- `burbage.sync`
-  - Manual sync using current working-tree change set.
+### 4. Relationship Dashboard (`burbage.openRelationshipDashboard`)
 
-- `burbage.openChat`
-  - Opens branded chat UI backed by Codex.
+Implemented:
+- Loads from `Entities/characters.yaml` + `Entities/relationships.yaml`.
+- Opens D3 force-directed webview panel.
+- Auto-refreshes via file watchers on:
+  - `Entities/characters.yaml`
+  - `Entities/relationships.yaml`
+- Node features:
+  - one node per character/entity
+  - color by character type
+  - persistent text label (name)
+  - hover annotation with type, bio, mentions
+- Edge features:
+  - links from relationship parties
+  - hover annotation with relationship type, formation, status, description, mentions
+- Tooltip suppression during drag.
 
-- `burbage.openRelationshipDashboard`
-  - Opens relationship graph webview.
+## What Is Not Implemented Yet
 
-## Implementation Backlog
+- Timeline dashboard command and UI (`burbage.openTimelineDashboard`) are not implemented.
+- True sync engine for diff-aware entity updates is not implemented as dedicated service.
+  - Current `burbage.sync` sends a sync prompt to chat.
+- Non-agentic character chat path (direct LLM adapter) is not implemented.
+- Provider/auth UI beyond Codex login terminal flow is not implemented.
+- Marketplace publishing pipeline is not finalized (local VSIX workflow exists).
 
-### Phase 0: Foundation
+## Core Files and Roles
 
-- Scaffold VS Code extension project.
-- Define commands, activation events, logging.
-- Add local debug launch config for Extension Development Host.
+- `src/extension.ts`
+  - currently monolithic implementation of setup, chat, codex bridge, and dashboard.
+- `AGENTS_burbage.md`
+  - canonical sync policy + YAML schemas for entities.
+- `settings_burbage.json`
+  - template workspace settings applied on setup.
+- `README.md`
+  - user/developer usage doc (currently partially outdated).
+- `package.json`
+  - command contributions, activation events, scripts, packaging includes.
 
-### Phase 1: Setup flow
+## Local Dev Workflow
 
-- Implement `burbage.setup`.
-- Add safe file creation + merge/replace/skip UX for existing files.
-- Add git init logic (if `.git` missing).
-- Add template copy from `AGENTS_burbage.md` and `settings_burbage.json`.
+### Prerequisites
+- Node.js + npm available in host shell.
+- VS Code desktop >= 1.109.
+- Codex account login performed via `Burbage: Login to Codex`.
 
-### Phase 2: Codex-backed Burbage chat
+### Build
+```bash
+npm install
+npm run compile
+```
 
-- Implement `AgentAdapter` for Codex bridge.
-- Build Burbage chat UI webview/sidebar.
-- Support basic prompt/response loop and error handling.
+### Package
+```bash
+npm run package
+```
 
-### Phase 3: Entity sync engine
+### Install
+- VS Code: `Extensions: Install from VSIX...`
+- select generated `burbage-<version>.vsix` at repo root.
 
-- Implement `EntitySyncService` change-set builder.
-- Support manual sync command.
-- Add pre-commit hook integration in advisory mode.
-- Ensure YAML parsing/repair for manually broken YAML files.
+## Testing Checklist (Manual)
 
-### Phase 4: Dashboards
+1. Setup
+- Run `Burbage: Setup Project` in empty folder.
+- Verify created dirs/files and `.gitignore` entries.
+- Verify local Codex runtime install path exists.
 
-- Build relationship graph D3 webview.
-- Add lightweight data transforms from `Entities/*.yaml`.
+2. Chat
+- Open Burbage sidebar.
+- Send prompt with Enter.
+- Verify in-chat working status updates then replacement by final assistant response.
+- Verify Sync button sends default sync prompt.
 
-### Phase 5: Non-agentic character chat
+3. Relationship dashboard
+- Open `Burbage: Open Relationship Dashboard`.
+- Verify graph renders from `Entities/*.yaml`.
+- Edit `characters.yaml` or `relationships.yaml` and save.
+- Verify panel auto-refreshes.
 
-- Implement `LLMAdapter` with provider config + secret storage.
-- Add character-chat mode and character context sourcing.
-- Keep strict boundary from Codex agentic flows.
+## Known Technical Debt
 
-### Phase 6: Packaging and local distribution
+- `src/extension.ts` is too large; needs modularization.
+- README and plan can drift from code; update docs whenever command surface changes.
+- No automated tests (unit/integration/e2e) yet.
+- Webview D3 is loaded from CDN (network dependency).
+- VSIX includes many JS files; bundling optimization not yet applied.
 
-- Configure `.vsix` packaging workflow.
-- Add smoke-test checklist for local install/update/uninstall.
-- Versioning + changelog discipline.
+## Suggested Refactor Plan (Next)
 
-## v0.1 scope target
+1. Split modules:
+- `setup.ts`
+- `codex.ts`
+- `chatSidebar.ts`
+- `dashboards/relationship.ts`
+- `yaml.ts` utilities
 
-- Setup command `burbage.setup`.
-- Burbage Codex chat MVP.
-- Manual entity sync command `burbage.sync`.
-- Basic relationship dashboards (read-only) `burbage.openRelationshipDashboard`.
-- Local `.vsix` packaging for testing.
+2. Introduce a real sync engine:
+- change-set collector (`git diff` + untracked manuscript files)
+- entity updater orchestration
+- review/apply workflow hooks
 
-## Domain-General Framing
+3. Add timeline dashboard as a first-class command:
+- `burbage.openTimelineDashboard`
+- parse `events.yaml` + manuscript docs
+- watcher-driven refresh
 
-- Treat `Manuscript/` as the project's source corpus, not strictly fiction chapters.
-- Treat "characters" as entities with agency or narrative relevance (including real people, groups, organizations, and states).
-- Treat "events" as notable occurrences in the source corpus (fictional or real-world).
-- Keep schema and sync logic domain-agnostic; avoid fiction-only assumptions in prompts and UI labels where possible.
+4. Add basic test harness:
+- parsing/data transform unit tests
+- setup behavior tests in temp workspace
 
-## Open Decisions
-
-- Exact Codex install UX (auto-install with explicit approval vs guided manual install).
-- Initial model/provider defaults for non-agentic character chat.
-- Final merge behavior for existing `.vscode/settings.json` (JSON patch strategy).
-- Pre-commit hook installation mechanism (`.git/hooks` direct vs `core.hooksPath`).
-
-## Status (2026-02-21)
-
-Done:
-- Extension scaffolded (TypeScript, commands, build/debug config).
-- `burbage.setup` implemented and tested locally.
-- Local `.vsix` packaging/install tested.
-- Local Codex runtime install integrated into setup (`.burbage/runtime`) with platform-specific npm resolution.
-- `burbage.openChat` implemented as a simple webview chat dialog backed by Codex CLI (`codex exec` + `codex exec resume` session continuity).
-- `burbage.loginCodex` command added and setup now checks Codex login status.
-- Burbage chat moved into an activity bar sidebar view with a `Sync` button that issues a sync prompt to Codex.
-
-Next:
-- Implement `burbage.sync` (change-set + entity sync engine).
-- Implement `burbage.openRelationshipDashboard`.
+5. Clean packaging/docs:
+- align README with actual feature set
+- add changelog discipline
+- consider bundling build for performance.

@@ -1,0 +1,1 @@
+When you start, read EXTENSION_PLAN.md and README.md to understand the project.
