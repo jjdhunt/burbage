@@ -1002,18 +1002,25 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
     const legend = document.getElementById('legend');
-    const aspect = 0.5;
+    const aspect = 0.75;
     let width = 0;
     let height = 0;
     let dragging = false;
     let backboneY = 0;
     let backboneDx = 150;
     let backboneStartX = 0;
+    const backboneDxScale = 3.0;
+    const eventAnchorStrength = 10.0;
     const anchorById = new Map();
 
     const eventNodes = graph.nodes
       .filter((node) => node.nodeKind === 'event')
       .sort((a, b) => (a.eventIndex || 0) - (b.eventIndex || 0));
+    const eventBackboneLinks = eventNodes.slice(0, -1).map((sourceNode, index) => ({
+      id: 'backbone:' + index,
+      source: sourceNode,
+      target: eventNodes[index + 1]
+    }));
     const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
     const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
     const nonEventNodes = graph.nodes.filter((node) => node.nodeKind !== 'event');
@@ -1041,12 +1048,12 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       backboneY = height / 2;
       const eventCount = eventNodes.length;
       if (eventCount <= 1) {
-        backboneDx = Math.max(64, Math.min(140, width * 0.35));
+        backboneDx = Math.max(64, Math.min(140, width * 0.35)) * backboneDxScale;
         backboneStartX = width / 2;
       } else {
         const margin = clamp(width * 0.12, 72, 180);
         backboneStartX = margin;
-        backboneDx = (width - margin * 2) / (eventCount - 1);
+        backboneDx = ((width - margin * 2) / (eventCount - 1)) * backboneDxScale;
       }
 
       anchorById.clear();
@@ -1185,17 +1192,36 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     updateTargets();
     renderLegend();
 
+    const backboneMarkerId = 'timeline-backbone-arrow';
+    const defs = svg.append('defs');
+    defs.append('marker')
+      .attr('id', backboneMarkerId)
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 9.5)
+      .attr('refY', 0)
+      .attr('markerWidth', 7)
+      .attr('markerHeight', 7)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', '#7b7b7b');
+
     const container = svg.append('g');
-    const backboneLayer = container.append('g');
+    const backboneEdgeLayer = container.append('g');
     const linkLayer = container.append('g');
     const nodeLayer = container.append('g');
     const labelLayer = container.append('g');
 
-    const backbone = backboneLayer.append('line')
+    const backboneEdge = backboneEdgeLayer
+      .selectAll('line')
+      .data(eventBackboneLinks, (d) => d.id)
+      .join('line')
       .attr('stroke', '#7b7b7b')
-      .attr('stroke-width', 1.4)
-      .attr('stroke-dasharray', '6 4')
-      .attr('stroke-linecap', 'round');
+      .attr('stroke-opacity', 0.85)
+      .attr('stroke-width', 1.6)
+      .attr('stroke-linecap', 'round')
+      .attr('marker-end', 'url(#' + backboneMarkerId + ')')
+      .attr('pointer-events', 'none');
 
     const zoom = d3.zoom()
       .scaleExtent([0.2, 3.5])
@@ -1308,11 +1334,11 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .force('link', linkForce)
       .force(
         'x',
-        d3.forceX((d) => d.targetX).strength((d) => (d.nodeKind === 'event' ? 0.95 : 0.24))
+        d3.forceX((d) => d.targetX).strength((d) => (d.nodeKind === 'event' ? eventAnchorStrength : 0.24))
       )
       .force(
         'y',
-        d3.forceY((d) => d.targetY).strength((d) => (d.nodeKind === 'event' ? 0.95 : 0.24))
+        d3.forceY((d) => d.targetY).strength((d) => (d.nodeKind === 'event' ? eventAnchorStrength : 0.24))
       )
       .force(
         'characterRepel',
@@ -1324,17 +1350,11 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       )
       .force('collision', d3.forceCollide((d) => nodeRadius(d) + 3).strength(0.85))
       .on('tick', () => {
-        const startX = eventNodes.length <= 1 ? width / 2 : backboneStartX;
-        const endX =
-          eventNodes.length <= 1
-            ? width / 2
-            : backboneStartX + Math.max(0, eventNodes.length - 1) * backboneDx;
-
-        backbone
-          .attr('x1', startX)
-          .attr('y1', backboneY)
-          .attr('x2', endX)
-          .attr('y2', backboneY);
+        backboneEdge
+          .attr('x1', (d) => d.source.x)
+          .attr('y1', (d) => d.source.y)
+          .attr('x2', (d) => d.target.x)
+          .attr('y2', (d) => d.target.y);
 
         link
           .attr('x1', (d) => d.source.x)
