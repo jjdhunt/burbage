@@ -75,7 +75,7 @@ type RelationshipDashboardState = {
   refreshTimer?: NodeJS.Timeout;
 };
 
-type TimelineNodeKind = "event" | "character" | "document";
+type TimelineNodeKind = "event" | "character" | "location" | "document";
 
 type TimelineGraphNode = {
   id: string;
@@ -96,7 +96,7 @@ type TimelineGraphLink = {
   id: string;
   source: string;
   target: string;
-  linkKind: "party" | "mention";
+  linkKind: "party" | "location" | "mention";
 };
 
 type TimelineGraphData = {
@@ -673,7 +673,7 @@ async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<
 
     panel.webview.html = getTimelineDashboardHtml(graph);
 
-    for (const relativePath of ["Entities/characters.yaml", "Entities/events.yaml", "Manuscript/**"]) {
+    for (const relativePath of ["Entities/characters.yaml", "Entities/locations.yaml", "Entities/events.yaml", "Manuscript/**"]) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
       const schedule = () => scheduleTimelineDashboardRefresh(state);
       watcher.onDidChange(schedule);
@@ -738,13 +738,21 @@ async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphDa
   const sources = await resolveTimelineDataSources(workspaceRoot);
   const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
   const charactersPath = path.join(sources.entitiesDirPath, "characters.yaml");
-  const [eventsRaw, charactersRaw, manuscriptDocuments] = await Promise.all([
+  const locationsPath = path.join(sources.entitiesDirPath, "locations.yaml");
+  const [eventsRaw, charactersRaw, locationsRaw, manuscriptDocuments] = await Promise.all([
     fs.readFile(eventsPath, "utf8"),
     fs.readFile(charactersPath, "utf8"),
+    pathExists(locationsPath).then((exists) => (exists ? fs.readFile(locationsPath, "utf8") : "{}\n")),
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
 
-  return buildTimelineGraph(parseYaml(eventsRaw), parseYaml(charactersRaw), manuscriptDocuments, sources.sourceLabel);
+  return buildTimelineGraph(
+    parseYaml(eventsRaw),
+    parseYaml(charactersRaw),
+    parseYaml(locationsRaw),
+    manuscriptDocuments,
+    sources.sourceLabel
+  );
 }
 
 async function resolveTimelineDataSources(workspaceRoot: string): Promise<{
@@ -771,13 +779,16 @@ async function resolveTimelineDataSources(workspaceRoot: string): Promise<{
 function buildTimelineGraph(
   eventsDocument: unknown,
   charactersDocument: unknown,
+  locationsDocument: unknown,
   manuscriptDocuments: string[],
   sourceLabel: string
 ): TimelineGraphData {
   const eventsRecord = asRecord(eventsDocument);
   const charactersRecord = asRecord(charactersDocument);
+  const locationsRecord = asRecord(locationsDocument);
   const eventEntries = Object.entries(eventsRecord);
   const knownCharacters = new Set(Object.keys(charactersRecord));
+  const knownLocations = new Set(Object.keys(locationsRecord));
 
   const documentOrder: string[] = [];
   const knownDocuments = new Set<string>();
@@ -833,6 +844,7 @@ function buildTimelineGraph(
   };
 
   const characterEventMap = new Map<string, Set<number>>();
+  const locationEventMap = new Map<string, Set<number>>();
   const documentEventMap = new Map<string, Set<number>>();
   const nodes: TimelineGraphNode[] = [];
   const links: TimelineGraphLink[] = [];
@@ -846,6 +858,7 @@ function buildTimelineGraph(
         .filter((mention): mention is string => typeof mention === "string")
     );
     const eventParties = toUniqueStrings(asStringArray(event["parties"]));
+    const eventLocations = toUniqueStrings(asStringArray(event["locations"]));
     const eventId = `event:${eventName}`;
 
     nodes.push({
@@ -879,6 +892,24 @@ function buildTimelineGraph(
       characterEventMap.set(partyName, eventIndices);
     }
 
+    for (const locationName of eventLocations) {
+      if (!knownLocations.has(locationName)) {
+        continue;
+      }
+
+      const locationId = `location:${locationName}`;
+      links.push({
+        id: `location:${eventName}:${locationName}`,
+        source: locationId,
+        target: eventId,
+        linkKind: "location"
+      });
+
+      const eventIndices = locationEventMap.get(locationName) ?? new Set<number>();
+      eventIndices.add(eventIndex);
+      locationEventMap.set(locationName, eventIndices);
+    }
+
     for (const mention of eventMentions) {
       if (!knownDocuments.has(mention)) {
         continue;
@@ -910,6 +941,21 @@ function buildTimelineGraph(
       meanEventIndex: connected.meanIndex,
       characterType: asOptionalString(character["type"]) ?? "Unknown",
       bio: asOptionalString(character["biography"]) ?? ""
+    });
+  }
+
+  for (const [locationName, locationValue] of Object.entries(locationsRecord)) {
+    const location = asRecord(locationValue);
+    const connected = getConnectedEventStats(locationEventMap.get(locationName), eventEntries.length);
+    nodes.push({
+      id: `location:${locationName}`,
+      name: locationName,
+      nodeKind: "location",
+      mentions: toUniqueStrings(asStringArray(location["mentions"])),
+      connectedEventSpan: connected.span,
+      connectedEventCount: connected.count,
+      meanEventIndex: connected.meanIndex,
+      bio: asOptionalString(location["description"]) ?? ""
     });
   }
 
@@ -1037,7 +1083,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
     const legend = document.getElementById('legend');
-    const aspect = 0.75;
+    const aspect = 0.5;
     let width = 0;
     let height = 0;
     let dragging = false;
@@ -1057,6 +1103,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       target: eventNodes[index + 1]
     }));
     const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
+    const characterLikeNodes = graph.nodes.filter((node) => node.nodeKind === 'character' || node.nodeKind === 'location');
     const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
     const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 
@@ -1069,6 +1116,10 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
+    }
+
+    function isCharacterLikeNode(node) {
+      return node.nodeKind === 'character' || node.nodeKind === 'location';
     }
 
     function setSize() {
@@ -1110,7 +1161,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
             const firstBackboneNode = eventNodes.length > 0 ? eventNodes[0] : undefined;
             const firstAnchor = firstBackboneNode ? anchorById.get(firstBackboneNode.id) : undefined;
             node.targetX = (firstAnchor ? firstAnchor.x : width / 2) - 2 * backboneDx;
-            if (node.nodeKind === 'character') {
+            if (isCharacterLikeNode(node)) {
               const yOffset = 2 * backboneDx * aspect;
               node.targetY = backboneY - yOffset;
             } else {
@@ -1123,7 +1174,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
             node.targetX = eventCount <= 1 ? width / 2 : backboneStartX + meanIndex * backboneDx;
             const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
             const yOffset = (span + 1) * backboneDx * aspect;
-            node.targetY = node.nodeKind === 'character' ? backboneY - yOffset : backboneY + 3 * backboneDx + yOffset;
+            node.targetY = isCharacterLikeNode(node) ? backboneY - yOffset : backboneY + 4 * backboneDx + yOffset;
           }
         }
 
@@ -1143,6 +1194,9 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       if (node.nodeKind === 'character') {
         return characterColor(node.characterType || 'Unknown');
       }
+      if (node.nodeKind === 'location') {
+        return '#029155';
+      }
       return '#5d92c9';
     }
 
@@ -1151,6 +1205,9 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         return 8.8;
       }
       if (node.nodeKind === 'character') {
+        return 8.2;
+      }
+      if (node.nodeKind === 'location') {
         return 8.2;
       }
       return 7.6;
@@ -1194,6 +1251,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
 
       const nodeKindRows = [
         { label: 'Event', color: '#d7a12f' },
+        { label: 'Location', color: '#10b981' },
         { label: 'Document', color: '#5d92c9' }
       ];
       for (const item of nodeKindRows) {
@@ -1324,7 +1382,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       .selectAll('path')
       .data(graph.links, (d) => d.id)
       .join('path')
-      .attr('stroke', (d) => (d.linkKind === 'party' ? '#7a7a7a' : '#6f85a1'))
+      .attr('stroke', (d) => (d.linkKind === 'mention' ? '#6f85a1' : '#7a7a7a'))
       .attr('stroke-opacity', defaultTimelineLinkOpacity)
       .attr('stroke-width', defaultTimelineLinkWidth)
       .on('mouseover', (event, d) => {
@@ -1334,7 +1392,11 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
         const sourceName = nodeById.get(sourceId)?.name || sourceId;
         const targetName = nodeById.get(targetId)?.name || targetId;
         showTooltip(event, [
-          d.linkKind === 'party' ? 'Character Participation' : 'Document Mention',
+          d.linkKind === 'mention'
+            ? 'Document Mention'
+            : d.linkKind === 'location'
+              ? 'Location Involvement'
+              : 'Character Participation',
           sourceName + ' -> ' + targetName
         ]);
       })
@@ -1370,6 +1432,17 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
             d.characterType ? 'Type: ' + d.characterType : 'Type: Unknown',
             'Connected event span: ' + (d.connectedEventSpan + 1),
             d.bio ? 'Bio: ' + d.bio : 'Bio: (none)',
+            'Mentions: ' + formatMentions(d.mentions)
+          ]);
+          return;
+        }
+
+        if (d.nodeKind === 'location') {
+          showTooltip(event, [
+            d.name,
+            'Type: Location',
+            'Connected event span: ' + (d.connectedEventSpan + 1),
+            d.bio ? 'Description: ' + d.bio : 'Description: (none)',
             'Mentions: ' + formatMentions(d.mentions)
           ]);
           return;
@@ -1416,7 +1489,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
 
     const characterLabels = labelLayer
       .selectAll('text.character')
-      .data(characterNodes, (d) => d.id)
+      .data(characterLikeNodes, (d) => d.id)
       .join('text')
       .attr('class', 'character')
       .attr('font-size', 11)
@@ -1449,7 +1522,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
 
     const linkForce = d3.forceLink(graph.links)
       .id((d) => d.id)
-      .distance((d) => (d.linkKind === 'party' ? Math.max(28, backboneDx * 0.9) : Math.max(24, backboneDx * 0.8)))
+      .distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)))
       .strength(0.08);
 
     const simulation = d3.forceSimulation(graph.nodes)
@@ -1465,7 +1538,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
       )
       .force(
         'characterRepel',
-        d3.forceManyBody().strength((d) => (d.nodeKind === 'character' ? -20 : 0)).distanceMax(260)
+        d3.forceManyBody().strength((d) => (d.nodeKind === 'character' || d.nodeKind === 'location' ? -20 : 0)).distanceMax(260)
       )
       .force(
         'documentRepel',
@@ -1504,7 +1577,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData): string {
     window.addEventListener('resize', () => {
       setSize();
       updateTargets();
-      linkForce.distance((d) => (d.linkKind === 'party' ? Math.max(28, backboneDx * 0.9) : Math.max(24, backboneDx * 0.8)));
+      linkForce.distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)));
       simulation.alpha(0.7).restart();
       hideTooltip();
       resetTimelineConnectionHighlight();
