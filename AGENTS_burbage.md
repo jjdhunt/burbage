@@ -5,6 +5,7 @@
   - The Entities:
     - The Characters (in `Entities/characters.yaml`) are all of the unique individuals, groups, organizations, polities, or other entities with agency or narrative relevance in the Manuscript.
     - The Locations (in `Entities/locations.yaml`) are all of the unique physical, imaginary, conceptual, or mental places mentioned in the Manuscript.
+    - The Geography (in `Entities/geography.yaml`) is the set of direct geographic connections between locations in `Entities/locations.yaml`.
     - The Events (in `Entities/events.yaml`) are all of the unique occurrences or pivotal decisions mentioned in the Manuscript. Events should be listed in as close to chronological order as possible.
     - The Relationships (in `Entities/relationships.yaml`) are all meaningful relationships between entities in `Entities/characters.yaml`. A relationship can include two or more entities.
 
@@ -79,7 +80,6 @@ Structure:
 <location name>:
   mentions: [<document reference>, ...]
   region: <parent location name or `null`>
-  adjacent: [<adjacent location>, ...]
   description: <short description>
 ```
 
@@ -87,7 +87,6 @@ Field definitions:
 
 - `mentions` (Required): list of Manuscript documents that mention the location.
 - `region` (Optional): parent region/location key; if non-empty, must match another key in `locations.yaml`.
-- `adjacent` (Optional): connected/adjacent location key; if non-empty, must match another key in `locations.yaml`. Adjacent locations are those mentioned as nearby or which one must travel through to get to another region. If someone travels from A to B to C, A and B are adjacent, B and C are adjacent, but B and C are not adjacent. If A is adjacent to B, B is adjacent to A.
 - `description` (Required): short free-text description.
 
 ## events.yaml
@@ -140,7 +139,29 @@ Field definitions:
 - `status` (Required): current relationship state (for example active, strained, broken, unknown).
 - `description` (Required): short description.
 
+## geography.yaml
+
+Purpose: stores geographic relationships between locations. Each entry is a connection between two locations mentioned in the Manuscript. Connected locations are physically adjacent or directly connected by a travel route. If someone travels from location A to B to C, then A and B are connected, B and C are connected, but A and C are not connected.
+
+Structure:
+
+```yaml
+<connection name>:
+  location_a: <location>
+  location_b: <location>
+  mentions: [<document reference>, ...]
+  description: <short description of connection>
+```
+
+Field definitions:
+- `location_a` (Required): first of the two connected locations. Must match a key in `locations.yaml`.
+- `location_b` (Required): second of the two connected locations. Must match a key in `locations.yaml`.
+- `mentions` (Required): list of Manuscript documents that mention the relationship between the locations.
+- `description` (Required): short free-text description of the connection.
+- `location_a` and `location_b` together define an undirected pair. `A-B` is identical to `B-A`.
+- `location_a` must not equal `location_b`.
+- Only one entry may exist per unordered location pair (no duplicate connections in opposite order).
 
 # Additional Instructions
 
-- When one or more documents are added to the Manuscript for the first time, there can be a lot of work to do. It is best to update the Entities in this order: Characters, Locations, Events, Relationships. As you progress through updating each, you might need to go back to update a previous Entity YAML (e.g. to add a missed Location where an Event takes place). You must read the entirety of each new Manuscript document. Proceed carefully; getting things right the first time will make it easy to update based on small diffs later. 
+- When one or more documents are added to the Manuscript for the first time, there can be a lot of work to do. It is best to update the Entities in this order: Characters, Locations, Geography, Events, Relationships. As you progress through updating each, you might need to go back to update a previous Entity YAML (e.g. to add a missed Location where an Event takes place). You must read the entirety of each new Manuscript document. Proceed carefully; getting things right the first time will make it easy to update based on small diffs later. 

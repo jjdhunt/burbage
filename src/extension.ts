@@ -34,6 +34,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("burbage.openTimelineDashboard", async () => {
       await openTimelineDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openLocationsHierarchyDashboard", async () => {
+      await openLocationsHierarchyDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openGeographyDashboard", async () => {
+      await openGeographyDashboard(context);
     })
   );
 }
@@ -106,10 +112,44 @@ type TimelineGraphData = {
   sourceLabel: string;
 };
 
+type LocationGraphNode = {
+  id: string;
+  name: string;
+  region?: string;
+  regionGroup: string;
+  adjacent: string[];
+  mentions: string[];
+  description: string;
+};
+
+type LocationGraphLink = {
+  id: string;
+  source: string;
+  target: string;
+  linkKind: "region" | "adjacent";
+};
+
+type LocationGraphData = {
+  nodes: LocationGraphNode[];
+  links: LocationGraphLink[];
+  sourceLabel: string;
+};
+
+type LocationDashboardMode = "hierarchy" | "geography";
+
 type TimelineDashboardState = {
   panel: vscode.WebviewPanel;
   workspaceRoot: string;
   graph: TimelineGraphData;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
+type LocationDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  graph: LocationGraphData;
+  mode: LocationDashboardMode;
   watchers: vscode.FileSystemWatcher[];
   refreshTimer?: NodeJS.Timeout;
 };
@@ -121,6 +161,10 @@ type DashboardHtmlOptions = {
 
 let relationshipDashboardState: RelationshipDashboardState | undefined;
 let timelineDashboardState: TimelineDashboardState | undefined;
+const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
+  hierarchy: undefined,
+  geography: undefined
+};
 
 async function openRelationshipDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
@@ -797,6 +841,150 @@ function disposeTimelineDashboardState(state: TimelineDashboardState): void {
   state.watchers = [];
 }
 
+async function openLocationsHierarchyDashboard(context: vscode.ExtensionContext): Promise<void> {
+  await openLocationsDashboard(context, "hierarchy");
+}
+
+async function openGeographyDashboard(context: vscode.ExtensionContext): Promise<void> {
+  await openLocationsDashboard(context, "geography");
+}
+
+function getLocationDashboardMeta(mode: LocationDashboardMode): {
+  panelId: string;
+  panelTitle: string;
+  saveFileName: string;
+  modeTitle: string;
+} {
+  if (mode === "hierarchy") {
+    return {
+      panelId: "burbage.locationsHierarchyDashboard",
+      panelTitle: "Burbage: Locations Hierarchy Dashboard",
+      saveFileName: "locations-hierarchy-dashboard.html",
+      modeTitle: "Locations Hierarchy"
+    };
+  }
+  return {
+    panelId: "burbage.geographyDashboard",
+    panelTitle: "Burbage: Geography Dashboard",
+    saveFileName: "geography-dashboard.html",
+    modeTitle: "Geography Dashboard"
+  };
+}
+
+async function openLocationsDashboard(context: vscode.ExtensionContext, mode: LocationDashboardMode): Promise<void> {
+  const dashboardMeta = getLocationDashboardMeta(mode);
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage(`Open a folder/workspace before opening ${dashboardMeta.modeTitle.toLowerCase()}.`);
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+    const currentState = locationDashboardStates[mode];
+
+    if (currentState && currentState.workspaceRoot === workspaceRoot) {
+      currentState.panel.reveal(vscode.ViewColumn.One, true);
+      await refreshLocationsDashboard(currentState, true);
+      return;
+    }
+
+    if (currentState) {
+      disposeLocationsDashboardState(currentState);
+      locationDashboardStates[mode] = undefined;
+    }
+
+    const graph = await loadLocationGraph(workspaceRoot, mode);
+
+    const panel = vscode.window.createWebviewPanel(dashboardMeta.panelId, dashboardMeta.panelTitle, vscode.ViewColumn.One, {
+      enableScripts: true,
+      retainContextWhenHidden: true
+    });
+
+    const state: LocationDashboardState = {
+      panel,
+      workspaceRoot,
+      graph,
+      mode,
+      watchers: []
+    };
+    locationDashboardStates[mode] = state;
+
+    panel.webview.html = getLocationsDashboardHtml(graph, mode);
+
+    const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (!isSaveDashboardMessage(message)) {
+        return;
+      }
+      await saveLocationsDashboardSnapshot(state);
+    });
+    context.subscriptions.push(messageDisposable);
+
+    const relativePaths = mode === "hierarchy"
+      ? ["Entities/locations.yaml"]
+      : ["Entities/locations.yaml", "Entities/geography.yaml"];
+    for (const relativePath of relativePaths) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => scheduleLocationsDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (locationDashboardStates[mode] === state) {
+        locationDashboardStates[mode] = undefined;
+      }
+      disposeLocationsDashboardState(state);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not open ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
+  }
+}
+
+function scheduleLocationsDashboardRefresh(state: LocationDashboardState): void {
+  if (locationDashboardStates[state.mode] !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshLocationsDashboard(state, false);
+  }, 180);
+}
+
+async function refreshLocationsDashboard(state: LocationDashboardState, showErrorToUser: boolean): Promise<void> {
+  if (locationDashboardStates[state.mode] !== state) {
+    return;
+  }
+  try {
+    const graph = await loadLocationGraph(state.workspaceRoot, state.mode);
+    state.graph = graph;
+    state.panel.webview.html = getLocationsDashboardHtml(graph, state.mode);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const dashboardMeta = getLocationDashboardMeta(state.mode);
+    vscode.window.showErrorMessage(`Could not refresh ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
+  }
+}
+
+function disposeLocationsDashboardState(state: LocationDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
+}
+
 async function saveRelationshipDashboardSnapshot(state: RelationshipDashboardState): Promise<void> {
   try {
     const html = getRelationshipDashboardHtml(state.graph, {
@@ -825,6 +1013,22 @@ async function saveTimelineDashboardSnapshot(state: TimelineDashboardState): Pro
   }
 }
 
+async function saveLocationsDashboardSnapshot(state: LocationDashboardState): Promise<void> {
+  try {
+    const dashboardMeta = getLocationDashboardMeta(state.mode);
+    const html = getLocationsDashboardHtml(state.graph, state.mode, {
+      includeSaveButton: false,
+      standaloneDarkMode: true
+    });
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, dashboardMeta.saveFileName, html);
+    vscode.window.showInformationMessage(`Saved ${dashboardMeta.modeTitle.toLowerCase()} to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const dashboardMeta = getLocationDashboardMeta(state.mode);
+    vscode.window.showErrorMessage(`Could not save ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
+  }
+}
+
 async function writeDashboardSnapshotFile(workspaceRoot: string, fileName: string, html: string): Promise<string> {
   const dashboardsDirPath = path.join(workspaceRoot, "dashboards");
   await fs.mkdir(dashboardsDirPath, { recursive: true });
@@ -832,6 +1036,24 @@ async function writeDashboardSnapshotFile(workspaceRoot: string, fileName: strin
   const outputPath = path.join(dashboardsDirPath, fileName);
   await fs.writeFile(outputPath, html, "utf8");
   return outputPath;
+}
+
+async function loadLocationGraph(workspaceRoot: string, mode: LocationDashboardMode): Promise<LocationGraphData> {
+  const entitiesDirPath = path.join(workspaceRoot, "Entities");
+  const locationsPath = path.join(entitiesDirPath, "locations.yaml");
+  const geographyPath = path.join(entitiesDirPath, "geography.yaml");
+  if (!(await pathExists(locationsPath))) {
+    throw new Error("Missing locations.yaml in Entities/. Run Burbage setup if needed.");
+  }
+  if (mode === "geography" && !(await pathExists(geographyPath))) {
+    throw new Error("Missing geography.yaml in Entities/. Run Burbage setup if needed.");
+  }
+
+  const [locationsRaw, geographyRaw] = await Promise.all([
+    fs.readFile(locationsPath, "utf8"),
+    pathExists(geographyPath).then((exists) => (exists ? fs.readFile(geographyPath, "utf8") : "{}\n"))
+  ]);
+  return buildLocationGraph(parseYaml(locationsRaw), parseYaml(geographyRaw), "Entities/", mode);
 }
 
 async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphData> {
@@ -1785,6 +2007,574 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
 </html>`;
 }
 
+function buildLocationGraph(
+  locationsDocument: unknown,
+  geographyDocument: unknown,
+  sourceLabel: string,
+  mode: LocationDashboardMode
+): LocationGraphData {
+  const locationsRecord = asRecord(locationsDocument);
+  const geographyRecord = asRecord(geographyDocument);
+  const locationNames = Object.keys(locationsRecord);
+  const knownLocations = new Set(locationNames);
+  const nodes: LocationGraphNode[] = [];
+  const nodeByName = new Map<string, LocationGraphNode>();
+
+  for (const [locationName, locationValue] of Object.entries(locationsRecord)) {
+    const location = asRecord(locationValue);
+    const regionName = asOptionalString(location["region"]);
+    const validRegionName = regionName && knownLocations.has(regionName) ? regionName : undefined;
+
+    const node: LocationGraphNode = {
+      id: `location:${locationName}`,
+      name: locationName,
+      region: regionName,
+      regionGroup: validRegionName ?? locationName,
+      adjacent: [],
+      mentions: toUniqueStrings(asStringArray(location["mentions"])),
+      description: asOptionalString(location["description"]) ?? ""
+    };
+    nodes.push(node);
+    nodeByName.set(locationName, node);
+  }
+
+  const links: LocationGraphLink[] = [];
+  const seenGeographyPairs = new Set<string>();
+  const adjacencyByName = new Map<string, Set<string>>();
+  for (const node of nodes) {
+    adjacencyByName.set(node.name, new Set<string>());
+  }
+
+  for (const node of nodes) {
+    const validRegionName = node.region && knownLocations.has(node.region) ? node.region : undefined;
+    if (validRegionName && validRegionName !== node.name) {
+      links.push({
+        id: `region:${node.name}:${validRegionName}`,
+        source: node.id,
+        target: `location:${validRegionName}`,
+        linkKind: "region"
+      });
+    }
+  }
+
+  for (const connectionValue of Object.values(geographyRecord)) {
+    const connection = asRecord(connectionValue);
+    const rawA = asOptionalString(connection["location_a"]);
+    const rawB = asOptionalString(connection["location_b"]);
+    if (!rawA || !rawB || rawA === rawB) {
+      continue;
+    }
+    if (!knownLocations.has(rawA) || !knownLocations.has(rawB)) {
+      continue;
+    }
+
+    const [a, b] = [rawA, rawB].sort((left, right) => left.localeCompare(right));
+    const key = `${a}::${b}`;
+    if (seenGeographyPairs.has(key)) {
+      continue;
+    }
+    seenGeographyPairs.add(key);
+
+    links.push({
+      id: `adjacent:${a}:${b}`,
+      source: `location:${a}`,
+      target: `location:${b}`,
+      linkKind: "adjacent"
+    });
+
+    adjacencyByName.get(a)?.add(b);
+    adjacencyByName.get(b)?.add(a);
+  }
+
+  for (const [locationName, adjacentSet] of adjacencyByName.entries()) {
+    const node = nodeByName.get(locationName);
+    if (!node) {
+      continue;
+    }
+    node.adjacent = Array.from(adjacentSet).sort((left, right) => left.localeCompare(right));
+  }
+
+  const filteredLinks = links.filter((link) => (mode === "hierarchy" ? link.linkKind === "region" : link.linkKind === "adjacent"));
+  return { nodes, links: filteredLinks, sourceLabel };
+}
+
+function getLocationsDashboardHtml(
+  graph: LocationGraphData,
+  mode: LocationDashboardMode,
+  options: DashboardHtmlOptions = {}
+): string {
+  const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const includeSaveButton = options.includeSaveButton ?? true;
+  const standaloneDarkMode = options.standaloneDarkMode ?? false;
+  const rootCssVars = standaloneDarkMode
+    ? `color-scheme: dark;
+      --dashboard-bg: #0f1318;
+      --dashboard-fg: #e7edf3;
+      --dashboard-border: #2a3340;
+      --dashboard-widget-bg: #181f28;
+      --dashboard-description: #9aa7b8;
+      --dashboard-tooltip-bg: rgba(21, 28, 36, 0.95);
+      --dashboard-tooltip-fg: #f3f6fb;
+      --dashboard-font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;`
+    : `color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-tooltip-bg: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
+  const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
+  const modeJson = JSON.stringify(mode);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      ${rootCssVars}
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
+      overflow: hidden;
+    }
+    .root {
+      width: 100%;
+      height: 100%;
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+      cursor: default;
+    }
+    .tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 420px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-tooltip-bg);
+      color: var(--dashboard-tooltip-fg);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      display: none;
+      font-size: 12px;
+    }
+    .legend {
+      position: fixed;
+      left: 14px;
+      bottom: 14px;
+      z-index: 100;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      max-width: min(40vw, 420px);
+      max-height: 45vh;
+      overflow: auto;
+    }
+    .legend-title {
+      margin: 0 0 6px 0;
+      color: var(--dashboard-description);
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .save-button {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 120;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  ${saveButtonHtml}
+  <div class="root">
+    <svg id="graph"></svg>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <div id="legend" class="legend"></div>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script>
+    const graph = ${graphJson};
+    const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
+    const svg = d3.select('#graph');
+    const tooltip = document.getElementById('tooltip');
+    const legend = document.getElementById('legend');
+    const saveButton = document.getElementById('save-dashboard');
+    if (saveButton && vscodeApi) {
+      saveButton.addEventListener('click', () => {
+        vscodeApi.postMessage({ type: 'saveDashboard' });
+      });
+    }
+    if (saveButton && !vscodeApi) {
+      saveButton.style.display = 'none';
+    }
+
+    const locationMode = ${modeJson};
+    let width = 0;
+    let height = 0;
+    let dragging = false;
+    const isHierarchyMode = locationMode === 'hierarchy';
+    const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+    const palette = [...d3.schemeTableau10, ...d3.schemeSet3];
+    const regionLinkColor = '#9b8c57';
+    const adjacentLinkColor = '#6f85a1';
+    const regionLinkStrength = 0.21;
+    const adjacentLinkStrength = regionLinkStrength / 5;
+    const dimmedLinkOpacity = locationMode === 'hierarchy' ? 0.16 : 0.06;
+    const dimmedLinkWidth = 0.9;
+    const highlightedLinkOpacity = 1;
+    const highlightedLinkWidth = 2.8;
+    const nodeColorGroupById = new Map();
+    const legendRows = [];
+
+    if (isHierarchyMode) {
+      const regionGroups = Array.from(new Set(graph.nodes.map((node) => node.regionGroup))).sort((a, b) => a.localeCompare(b));
+      for (const node of graph.nodes) {
+        nodeColorGroupById.set(node.id, node.regionGroup);
+      }
+      for (const regionGroup of regionGroups) {
+        legendRows.push({ key: regionGroup, label: regionGroup });
+      }
+    } else {
+      const neighbors = new Map(graph.nodes.map((node) => [node.id, []]));
+      for (const edge of graph.links) {
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        if (!neighbors.has(sourceId) || !neighbors.has(targetId)) {
+          continue;
+        }
+        neighbors.get(sourceId).push(targetId);
+        neighbors.get(targetId).push(sourceId);
+      }
+
+      const visited = new Set();
+      let componentCount = 0;
+      for (const node of graph.nodes) {
+        if (visited.has(node.id)) {
+          continue;
+        }
+        componentCount += 1;
+        const componentKey = 'component:' + componentCount;
+        const queue = [node.id];
+        let queueIndex = 0;
+        let size = 0;
+        visited.add(node.id);
+        while (queueIndex < queue.length) {
+          const currentId = queue[queueIndex];
+          queueIndex += 1;
+          size += 1;
+          nodeColorGroupById.set(currentId, componentKey);
+          for (const neighborId of neighbors.get(currentId) || []) {
+            if (visited.has(neighborId)) {
+              continue;
+            }
+            visited.add(neighborId);
+            queue.push(neighborId);
+          }
+        }
+        legendRows.push({ key: componentKey, label: 'Component ' + componentCount + ' (' + size + ')' });
+      }
+    }
+
+    const colorGroups = legendRows.map((row) => row.key);
+    const nodeColor = d3.scaleOrdinal(colorGroups, palette);
+
+    function nodeFill(node) {
+      const groupKey = nodeColorGroupById.get(node.id) || '__unassigned__';
+      return nodeColor(groupKey);
+    }
+
+    function setSize() {
+      const rect = document.body.getBoundingClientRect();
+      width = Math.max(300, rect.width);
+      height = Math.max(300, rect.height);
+      svg.attr('viewBox', [0, 0, width, height]);
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+      tooltip.textContent = '';
+    }
+
+    function positionTooltip(event) {
+      const offset = 14;
+      const maxX = window.innerWidth - tooltip.offsetWidth - 8;
+      const maxY = window.innerHeight - tooltip.offsetHeight - 8;
+      const x = Math.min(maxX, event.clientX + offset);
+      const y = Math.min(maxY, event.clientY + offset);
+      tooltip.style.left = Math.max(8, x) + 'px';
+      tooltip.style.top = Math.max(8, y) + 'px';
+    }
+
+    function showTooltip(event, rows) {
+      tooltip.textContent = rows.filter(Boolean).join('\\n');
+      tooltip.style.display = 'block';
+      positionTooltip(event);
+    }
+
+    function formatMentions(mentions) {
+      if (!Array.isArray(mentions) || mentions.length === 0) {
+        return '(none)';
+      }
+      return mentions.join(', ');
+    }
+
+    function formatAdjacent(adjacent) {
+      if (!Array.isArray(adjacent) || adjacent.length === 0) {
+        return '(none)';
+      }
+      return adjacent.join(', ');
+    }
+
+    function renderLegend() {
+      legend.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'legend-title';
+      title.textContent = isHierarchyMode ? 'Region Family' : 'Connected Geography Components';
+      legend.appendChild(title);
+
+      for (const rowData of legendRows) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = nodeColor(rowData.key);
+        const label = document.createElement('span');
+        label.textContent = rowData.label;
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legend.appendChild(row);
+      }
+    }
+
+    setSize();
+    renderLegend();
+
+    const regionArrowId = 'locations-region-arrow';
+    if (isHierarchyMode) {
+      const defs = svg.append('defs');
+      defs
+        .append('marker')
+        .attr('id', regionArrowId)
+        .attr('viewBox', '0 -4 8 8')
+        .attr('refX', 7.2)
+        .attr('refY', 0)
+        .attr('markerWidth', 5)
+        .attr('markerHeight', 5)
+        .attr('orient', 'auto')
+        .append('path')
+        .attr('d', 'M0,-4L8,0L0,4')
+        .attr('fill', regionLinkColor);
+    }
+
+    const container = svg.append('g');
+    const linkLayer = container.append('g').attr('fill', 'none');
+    const nodeLayer = container.append('g');
+    const labelLayer = container.append('g');
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.2, 3.5])
+      .on('zoom', (event) => {
+        container.attr('transform', event.transform);
+        hideTooltip();
+        resetLocationLinkHighlight();
+      });
+    svg.call(zoom);
+
+    function linkEndId(linkEnd) {
+      return typeof linkEnd === 'string' ? linkEnd : linkEnd.id;
+    }
+
+    function defaultLocationLinkOpacity(linkDatum) {
+      return isHierarchyMode ? 0.64 : 0.08;
+    }
+
+    function defaultLocationLinkWidth(linkDatum) {
+      return isHierarchyMode ? 1.7 : 1.0;
+    }
+
+    const link = linkLayer
+      .selectAll('line')
+      .data(graph.links, (d) => d.id)
+      .join('line')
+      .attr('stroke', () => (isHierarchyMode ? regionLinkColor : adjacentLinkColor))
+      .attr('stroke-opacity', (d) => defaultLocationLinkOpacity(d))
+      .attr('stroke-width', (d) => defaultLocationLinkWidth(d))
+      .attr('marker-end', () => (isHierarchyMode ? 'url(#' + regionArrowId + ')' : null))
+      .on('mouseover', (event, d) => {
+        if (dragging) return;
+        const sourceId = linkEndId(d.source);
+        const targetId = linkEndId(d.target);
+        const sourceName = nodeById.get(sourceId)?.name || sourceId;
+        const targetName = nodeById.get(targetId)?.name || targetId;
+        if (d.linkKind === 'region') {
+          showTooltip(event, ['Region Link', sourceName + ' -> ' + targetName]);
+          return;
+        }
+        showTooltip(event, ['Geography Connection', sourceName + ' <-> ' + targetName]);
+      })
+      .on('mousemove', (event) => {
+        if (dragging || tooltip.style.display !== 'block') return;
+        positionTooltip(event);
+      })
+      .on('mouseout', hideTooltip);
+
+    const node = nodeLayer
+      .selectAll('circle')
+      .data(graph.nodes, (d) => d.id)
+      .join('circle')
+      .attr('r', 8.4)
+      .attr('fill', (d) => nodeFill(d))
+      .attr('stroke', 'rgba(0,0,0,0.45)')
+      .attr('stroke-width', 1)
+      .on('mouseover', (event, d) => {
+        if (dragging) return;
+        showTooltip(event, [
+          d.name,
+          d.region ? 'Region: ' + d.region : 'Region: (none)',
+          (isHierarchyMode ? 'Connected locations: ' : 'Connected in geography: ') + formatAdjacent(d.adjacent),
+          d.description ? 'Description: ' + d.description : 'Description: (none)',
+          'Mentions: ' + formatMentions(d.mentions)
+        ]);
+      })
+      .on('mousemove', (event) => {
+        if (dragging || tooltip.style.display !== 'block') return;
+        positionTooltip(event);
+      })
+      .on('mouseout', hideTooltip);
+
+    const nodeLabel = labelLayer
+      .selectAll('text')
+      .data(graph.nodes, (d) => d.id)
+      .join('text')
+      .attr('font-size', 11)
+      .attr('fill', 'var(--dashboard-fg)')
+      .attr('dominant-baseline', 'middle')
+      .attr('pointer-events', 'none')
+      .text((d) => d.name);
+
+    function resetLocationLinkHighlight() {
+      link
+        .attr('stroke-opacity', (d) => defaultLocationLinkOpacity(d))
+        .attr('stroke-width', (d) => defaultLocationLinkWidth(d));
+    }
+
+    function highlightLocationLinksForNode(nodeId) {
+      link
+        .attr('stroke-opacity', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedLinkOpacity : dimmedLinkOpacity;
+        })
+        .attr('stroke-width', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedLinkWidth : dimmedLinkWidth;
+        });
+    }
+
+    const simulation = d3.forceSimulation(graph.nodes)
+      .force(
+        'link',
+        d3
+          .forceLink(graph.links)
+          .id((d) => d.id)
+          .distance(() => (isHierarchyMode ? 82 : 120))
+          .strength(() => (isHierarchyMode ? regionLinkStrength : adjacentLinkStrength))
+      )
+      .force('charge', d3.forceManyBody().strength(-170))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('x', d3.forceX(width / 2).strength(0.018))
+      .force('y', d3.forceY(height / 2).strength(0.018))
+      .force('collision', d3.forceCollide(18))
+      .on('tick', () => {
+        link
+          .attr('x1', (d) => d.source.x)
+          .attr('y1', (d) => d.source.y)
+          .attr('x2', (d) => d.target.x)
+          .attr('y2', (d) => d.target.y);
+
+        node
+          .attr('cx', (d) => d.x)
+          .attr('cy', (d) => d.y);
+
+        nodeLabel
+          .attr('x', (d) => d.x + 10)
+          .attr('y', (d) => d.y);
+      });
+
+    window.addEventListener('resize', () => {
+      setSize();
+      simulation.force('center', d3.forceCenter(width / 2, height / 2));
+      simulation.force('x', d3.forceX(width / 2).strength(0.018));
+      simulation.force('y', d3.forceY(height / 2).strength(0.018));
+      simulation.alpha(0.35).restart();
+      hideTooltip();
+      resetLocationLinkHighlight();
+    });
+
+    const drag = d3.drag()
+      .on('start', (event, d) => {
+        dragging = true;
+        hideTooltip();
+        highlightLocationLinksForNode(d.id);
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on('drag', (event, d) => {
+        hideTooltip();
+        highlightLocationLinksForNode(d.id);
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on('end', (event, d) => {
+        dragging = false;
+        hideTooltip();
+        resetLocationLinkHighlight();
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+
+    node.call(drag);
+  </script>
+</body>
+</html>`;
+}
+
 async function runSetupProject(context: vscode.ExtensionContext): Promise<void> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) {
@@ -1801,6 +2591,7 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
 
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "characters.yaml"), "{}\n", summary, workspaceRoot);
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "locations.yaml"), "{}\n", summary, workspaceRoot);
+  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "geography.yaml"), "{}\n", summary, workspaceRoot);
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "events.yaml"), "{}\n", summary, workspaceRoot);
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "relationships.yaml"), "{}\n", summary, workspaceRoot);
 
@@ -2115,14 +2906,14 @@ async function runCodexPrompt(
         "exec",
         "resume",
         threadId,
-        prompt,
+        "-",
         "--json",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox"
       ]
     : [
         "exec",
-        prompt,
+        "-",
         "--json",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -2181,7 +2972,8 @@ async function runCodexPrompt(
           return;
         }
         addProgress(normalized);
-      }
+      },
+      prompt
     );
   } catch (error) {
     throw new Error(formatExecError("Codex command failed.", error));
@@ -2593,7 +3385,8 @@ async function runCommandStreaming(
   args: string[],
   cwd: string,
   onStdoutLine: (line: string) => void,
-  onStderrLine: (line: string) => void
+  onStderrLine: (line: string) => void,
+  stdinText?: string
 ): Promise<CommandResult> {
   let spawnCommand = command;
   let spawnArgs = args;
@@ -2604,7 +3397,7 @@ async function runCommandStreaming(
   }
 
   return await new Promise<CommandResult>((resolve, reject) => {
-    const child = spawn(spawnCommand, spawnArgs, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(spawnCommand, spawnArgs, { cwd, stdio: [stdinText !== undefined ? "pipe" : "ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let stdoutBuffer = "";
@@ -2622,6 +3415,11 @@ async function runCommandStreaming(
       return pending;
     };
 
+    if (!child.stdout || !child.stderr) {
+      reject(new Error("Failed to initialize child process output streams."));
+      return;
+    }
+
     child.stdout.on("data", (chunk: Buffer | string) => {
       const text = asText(chunk);
       stdout += text;
@@ -2635,6 +3433,13 @@ async function runCommandStreaming(
       stderrBuffer += text;
       stderrBuffer = flushLines(stderrBuffer, onStderrLine);
     });
+
+    if (stdinText !== undefined && child.stdin) {
+      child.stdin.on("error", () => {
+        // Ignore EPIPE and similar errors if the subprocess closes stdin early.
+      });
+      child.stdin.end(stdinText);
+    }
 
     child.on("error", (error) => {
       const wrapped = error as Error & { stdout?: string; stderr?: string };

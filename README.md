@@ -2,12 +2,22 @@
 
 Burbage is a VS Code extension for entity synchronization in structured text projects.
 
+Entity schemas in `Entities/`:
+- `characters.yaml`
+- `locations.yaml` (location definitions with `region`)
+- `geography.yaml` (location-to-location connections as undirected pairs; one entry per unordered pair)
+- `events.yaml`
+- `relationships.yaml`
+
 Current MVP commands:
 - `Burbage: Setup Project` (`burbage.setup`)
 - `Burbage: Sync Entities` (`burbage.sync`) - sends a sync request into Burbage chat
 - `Burbage: Open Chat` (`burbage.openChat`)
 - `Burbage: Login to Codex` (`burbage.loginCodex`)
 - `Burbage: Open Relationship Dashboard` (`burbage.openRelationshipDashboard`) - placeholder
+- `Burbage: Open Timeline Dashboard` (`burbage.openTimelineDashboard`)
+- `Burbage: Open Locations Hierarchy Dashboard` (`burbage.openLocationsHierarchyDashboard`)
+- `Burbage: Open Geography Dashboard` (`burbage.openGeographyDashboard`)
 
 ## What `Burbage: Setup Project` does
 
@@ -17,6 +27,7 @@ It performs additive, non-destructive setup in the current workspace:
 - Creates missing entity files:
   - `Entities/characters.yaml`
   - `Entities/locations.yaml`
+  - `Entities/geography.yaml`
   - `Entities/events.yaml`
   - `Entities/relationships.yaml`
 - Initializes git repository if missing.
