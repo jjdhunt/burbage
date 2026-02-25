@@ -18,6 +18,7 @@ Current MVP commands:
 - `Burbage: Open Timeline Dashboard` (`burbage.openTimelineDashboard`)
 - `Burbage: Open Locations Hierarchy Dashboard` (`burbage.openLocationsHierarchyDashboard`)
 - `Burbage: Open Geography Dashboard` (`burbage.openGeographyDashboard`)
+- `Burbage: Open Causal Diagram Dashboard` (`burbage.openCausalDiagramDashboard`)
 
 ## What `Burbage: Setup Project` does
 

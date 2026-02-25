@@ -40,6 +40,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("burbage.openGeographyDashboard", async () => {
       await openGeographyDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openCausalDiagramDashboard", async () => {
+      await openCausalDiagramDashboard(context);
     })
   );
 }
@@ -135,6 +138,28 @@ type LocationGraphData = {
   sourceLabel: string;
 };
 
+type CausalEventNode = {
+  id: string;
+  name: string;
+  mentions: string[];
+  date: string;
+  summary: string;
+  valence?: number;
+  causes: string[];
+};
+
+type CausalEventLink = {
+  id: string;
+  source: string;
+  target: string;
+};
+
+type CausalGraphData = {
+  nodes: CausalEventNode[];
+  links: CausalEventLink[];
+  sourceLabel: string;
+};
+
 type LocationDashboardMode = "hierarchy" | "geography";
 
 type TimelineDashboardState = {
@@ -154,6 +179,14 @@ type LocationDashboardState = {
   refreshTimer?: NodeJS.Timeout;
 };
 
+type CausalDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  graph: CausalGraphData;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
 type DashboardHtmlOptions = {
   includeSaveButton?: boolean;
   standaloneDarkMode?: boolean;
@@ -161,6 +194,7 @@ type DashboardHtmlOptions = {
 
 let relationshipDashboardState: RelationshipDashboardState | undefined;
 let timelineDashboardState: TimelineDashboardState | undefined;
+let causalDashboardState: CausalDashboardState | undefined;
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -841,6 +875,118 @@ function disposeTimelineDashboardState(state: TimelineDashboardState): void {
   state.watchers = [];
 }
 
+async function openCausalDiagramDashboard(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the causal diagram dashboard.");
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+
+    if (causalDashboardState && causalDashboardState.workspaceRoot === workspaceRoot) {
+      causalDashboardState.panel.reveal(vscode.ViewColumn.One, true);
+      await refreshCausalDashboard(causalDashboardState, true);
+      return;
+    }
+
+    if (causalDashboardState) {
+      disposeCausalDashboardState(causalDashboardState);
+      causalDashboardState = undefined;
+    }
+
+    const graph = await loadCausalGraph(workspaceRoot);
+
+    const panel = vscode.window.createWebviewPanel(
+      "burbage.causalDiagramDashboard",
+      "Burbage: Causal Diagram Dashboard",
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+
+    const state: CausalDashboardState = {
+      panel,
+      workspaceRoot,
+      graph,
+      watchers: []
+    };
+    causalDashboardState = state;
+
+    panel.webview.html = getCausalDashboardHtml(graph);
+
+    const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (!isSaveDashboardMessage(message)) {
+        return;
+      }
+      await saveCausalDashboardSnapshot(state);
+    });
+    context.subscriptions.push(messageDisposable);
+
+    for (const relativePath of ["Entities/events.yaml"]) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => scheduleCausalDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (causalDashboardState === state) {
+        causalDashboardState = undefined;
+      }
+      disposeCausalDashboardState(state);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not open causal diagram dashboard: ${message}`);
+  }
+}
+
+function scheduleCausalDashboardRefresh(state: CausalDashboardState): void {
+  if (causalDashboardState !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshCausalDashboard(state, false);
+  }, 180);
+}
+
+async function refreshCausalDashboard(state: CausalDashboardState, showErrorToUser: boolean): Promise<void> {
+  if (causalDashboardState !== state) {
+    return;
+  }
+  try {
+    const graph = await loadCausalGraph(state.workspaceRoot);
+    state.graph = graph;
+    state.panel.webview.html = getCausalDashboardHtml(graph);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not refresh causal diagram dashboard: ${message}`);
+  }
+}
+
+function disposeCausalDashboardState(state: CausalDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
+}
+
 async function openLocationsHierarchyDashboard(context: vscode.ExtensionContext): Promise<void> {
   await openLocationsDashboard(context, "hierarchy");
 }
@@ -1013,6 +1159,20 @@ async function saveTimelineDashboardSnapshot(state: TimelineDashboardState): Pro
   }
 }
 
+async function saveCausalDashboardSnapshot(state: CausalDashboardState): Promise<void> {
+  try {
+    const html = getCausalDashboardHtml(state.graph, {
+      includeSaveButton: false,
+      standaloneDarkMode: true
+    });
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, "causal-diagram-dashboard.html", html);
+    vscode.window.showInformationMessage(`Saved causal diagram dashboard to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not save causal diagram dashboard: ${message}`);
+  }
+}
+
 async function saveLocationsDashboardSnapshot(state: LocationDashboardState): Promise<void> {
   try {
     const dashboardMeta = getLocationDashboardMeta(state.mode);
@@ -1036,6 +1196,17 @@ async function writeDashboardSnapshotFile(workspaceRoot: string, fileName: strin
   const outputPath = path.join(dashboardsDirPath, fileName);
   await fs.writeFile(outputPath, html, "utf8");
   return outputPath;
+}
+
+async function loadCausalGraph(workspaceRoot: string): Promise<CausalGraphData> {
+  const entitiesDirPath = path.join(workspaceRoot, "Entities");
+  const eventsPath = path.join(entitiesDirPath, "events.yaml");
+  if (!(await pathExists(eventsPath))) {
+    throw new Error("Missing events.yaml in Entities/. Run Burbage setup if needed.");
+  }
+
+  const eventsRaw = await fs.readFile(eventsPath, "utf8");
+  return buildCausalGraph(parseYaml(eventsRaw), "Entities/");
 }
 
 async function loadLocationGraph(workspaceRoot: string, mode: LocationDashboardMode): Promise<LocationGraphData> {
@@ -1999,6 +2170,504 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
         d.fy = d.nodeKind === 'event' ? backboneY : null;
+      });
+
+    node.call(drag);
+  </script>
+</body>
+</html>`;
+}
+
+function buildCausalGraph(eventsDocument: unknown, sourceLabel: string): CausalGraphData {
+  const eventsRecord = asRecord(eventsDocument);
+  const eventEntries = Object.entries(eventsRecord);
+  const knownEvents = new Set(eventEntries.map(([eventName]) => eventName));
+  const nodes: CausalEventNode[] = [];
+
+  const parseValence = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value.trim());
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  for (const [eventName, eventValue] of eventEntries) {
+    const event = asRecord(eventValue);
+    const causes = toUniqueStrings([
+      ...asStringArray(event["causes"]),
+      ...(asOptionalString(event["cause"]) ? [asOptionalString(event["cause"]) as string] : [])
+    ]);
+    nodes.push({
+      id: `event:${eventName}`,
+      name: eventName,
+      mentions: toUniqueStrings(asStringArray(event["mentions"])),
+      date: asOptionalString(event["date"]) ?? "",
+      summary: asOptionalString(event["summary"]) ?? "",
+      valence: parseValence(event["valence"]),
+      causes
+    });
+  }
+
+  const links: CausalEventLink[] = [];
+  const seenLinks = new Set<string>();
+  for (const node of nodes) {
+    for (const causeName of node.causes) {
+      if (!knownEvents.has(causeName) || causeName === node.name) {
+        continue;
+      }
+      const source = `event:${causeName}`;
+      const target = node.id;
+      const key = `${source}=>${target}`;
+      if (seenLinks.has(key)) {
+        continue;
+      }
+      seenLinks.add(key);
+      links.push({
+        id: `cause:${causeName}:${node.name}`,
+        source,
+        target
+      });
+    }
+  }
+
+  return { nodes, links, sourceLabel };
+}
+
+function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOptions = {}): string {
+  const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const includeSaveButton = options.includeSaveButton ?? true;
+  const standaloneDarkMode = options.standaloneDarkMode ?? false;
+  const rootCssVars = standaloneDarkMode
+    ? `color-scheme: dark;
+      --dashboard-bg: #0f1318;
+      --dashboard-fg: #e7edf3;
+      --dashboard-border: #2a3340;
+      --dashboard-widget-bg: #181f28;
+      --dashboard-description: #9aa7b8;
+      --dashboard-tooltip-bg: rgba(21, 28, 36, 0.95);
+      --dashboard-tooltip-fg: #f3f6fb;
+      --dashboard-font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;`
+    : `color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-tooltip-bg: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
+  const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      ${rootCssVars}
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
+      overflow: hidden;
+    }
+    .root {
+      width: 100%;
+      height: 100%;
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+      cursor: default;
+    }
+    .tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 460px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-tooltip-bg);
+      color: var(--dashboard-tooltip-fg);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      display: none;
+      font-size: 12px;
+    }
+    .legend {
+      position: fixed;
+      left: 14px;
+      bottom: 14px;
+      z-index: 100;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      max-width: min(40vw, 400px);
+      max-height: 45vh;
+      overflow: auto;
+    }
+    .legend-title {
+      margin: 0 0 6px 0;
+      color: var(--dashboard-description);
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .save-button {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 120;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  ${saveButtonHtml}
+  <div class="root">
+    <svg id="graph"></svg>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <div id="legend" class="legend"></div>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script>
+    const graph = ${graphJson};
+    const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
+    const svg = d3.select('#graph');
+    const tooltip = document.getElementById('tooltip');
+    const legend = document.getElementById('legend');
+    const saveButton = document.getElementById('save-dashboard');
+    if (saveButton && vscodeApi) {
+      saveButton.addEventListener('click', () => {
+        vscodeApi.postMessage({ type: 'saveDashboard' });
+      });
+    }
+    if (saveButton && !vscodeApi) {
+      saveButton.style.display = 'none';
+    }
+
+    let width = 0;
+    let height = 0;
+    let dragging = false;
+    const nodeRadius = 8.8;
+    const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+    const defaultLinkOpacity = 0.7;
+    const defaultLinkWidth = 1.6;
+    const dimmedLinkOpacity = 0.14;
+    const dimmedLinkWidth = 1.0;
+    const highlightedLinkOpacity = 1;
+    const highlightedLinkWidth = 2.8;
+
+    function setSize() {
+      const rect = document.body.getBoundingClientRect();
+      width = Math.max(360, rect.width);
+      height = Math.max(300, rect.height);
+      svg.attr('viewBox', [0, 0, width, height]);
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function isFiniteNumber(value) {
+      return typeof value === 'number' && Number.isFinite(value);
+    }
+
+    function nodeFill(node) {
+      if (!isFiniteNumber(node.valence)) {
+        return '#7d8590';
+      }
+      const normalized = (clamp(node.valence, 1, 10) - 1) / 9;
+      return d3.interpolateRdYlGn(normalized);
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+      tooltip.textContent = '';
+    }
+
+    function positionTooltip(event) {
+      const offset = 14;
+      const maxX = window.innerWidth - tooltip.offsetWidth - 8;
+      const maxY = window.innerHeight - tooltip.offsetHeight - 8;
+      const x = Math.min(maxX, event.clientX + offset);
+      const y = Math.min(maxY, event.clientY + offset);
+      tooltip.style.left = Math.max(8, x) + 'px';
+      tooltip.style.top = Math.max(8, y) + 'px';
+    }
+
+    function showTooltip(event, rows) {
+      tooltip.textContent = rows.filter(Boolean).join('\\n');
+      tooltip.style.display = 'block';
+      positionTooltip(event);
+    }
+
+    function formatMentions(mentions) {
+      if (!Array.isArray(mentions) || mentions.length === 0) {
+        return '(none)';
+      }
+      return mentions.join(', ');
+    }
+
+    function formatCauses(causes) {
+      if (!Array.isArray(causes) || causes.length === 0) {
+        return '(none)';
+      }
+      return causes.join(', ');
+    }
+
+    function linkEndId(linkEnd) {
+      return typeof linkEnd === 'string' ? linkEnd : linkEnd.id;
+    }
+
+    function trimDirectedLink(linkDatum) {
+      const sourceNode = typeof linkDatum.source === 'string' ? nodeById.get(linkDatum.source) : linkDatum.source;
+      const targetNode = typeof linkDatum.target === 'string' ? nodeById.get(linkDatum.target) : linkDatum.target;
+      if (!sourceNode || !targetNode) {
+        return { x1: 0, y1: 0, x2: 0, y2: 0 };
+      }
+
+      const dx = (targetNode.x || 0) - (sourceNode.x || 0);
+      const dy = (targetNode.y || 0) - (sourceNode.y || 0);
+      const length = Math.hypot(dx, dy);
+      if (!Number.isFinite(length) || length < 0.001) {
+        return {
+          x1: sourceNode.x || 0,
+          y1: sourceNode.y || 0,
+          x2: targetNode.x || 0,
+          y2: targetNode.y || 0
+        };
+      }
+      const ux = dx / length;
+      const uy = dy / length;
+      const startInset = nodeRadius + 1;
+      const endInset = nodeRadius + 2;
+      return {
+        x1: (sourceNode.x || 0) + ux * startInset,
+        y1: (sourceNode.y || 0) + uy * startInset,
+        x2: (targetNode.x || 0) - ux * endInset,
+        y2: (targetNode.y || 0) - uy * endInset
+      };
+    }
+
+    function renderLegend() {
+      legend.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'legend-title';
+      title.textContent = 'Event Valence';
+      legend.appendChild(title);
+
+      const rows = [
+        { label: 'Low (1)', color: d3.interpolateRdYlGn(0) },
+        { label: 'High (10)', color: d3.interpolateRdYlGn(1) },
+        { label: 'Unknown', color: '#7d8590' }
+      ];
+      for (const rowData of rows) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = rowData.color;
+        const label = document.createElement('span');
+        label.textContent = rowData.label;
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legend.appendChild(row);
+      }
+    }
+
+    setSize();
+    renderLegend();
+
+    const markerId = 'causal-link-arrow';
+    const defs = svg.append('defs');
+    defs.append('marker')
+      .attr('id', markerId)
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 9.4)
+      .attr('refY', 0)
+      .attr('markerWidth', 7)
+      .attr('markerHeight', 7)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', '#86a5c5');
+
+    const container = svg.append('g');
+    const linkLayer = container.append('g').attr('fill', 'none');
+    const nodeLayer = container.append('g');
+    const labelLayer = container.append('g');
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.2, 3.5])
+      .on('zoom', (event) => {
+        container.attr('transform', event.transform);
+        hideTooltip();
+        resetCausalLinkHighlight();
+      });
+    svg.call(zoom);
+
+    const link = linkLayer
+      .selectAll('line')
+      .data(graph.links, (d) => d.id)
+      .join('line')
+      .attr('stroke', '#86a5c5')
+      .attr('stroke-opacity', defaultLinkOpacity)
+      .attr('stroke-width', defaultLinkWidth)
+      .attr('marker-end', 'url(#' + markerId + ')')
+      .on('mouseover', (event, d) => {
+        if (dragging) return;
+        const sourceName = nodeById.get(linkEndId(d.source))?.name || linkEndId(d.source);
+        const targetName = nodeById.get(linkEndId(d.target))?.name || linkEndId(d.target);
+        showTooltip(event, ['Causal Link', sourceName + ' -> ' + targetName]);
+      })
+      .on('mousemove', (event) => {
+        if (dragging || tooltip.style.display !== 'block') return;
+        positionTooltip(event);
+      })
+      .on('mouseout', hideTooltip);
+
+    const node = nodeLayer
+      .selectAll('circle')
+      .data(graph.nodes, (d) => d.id)
+      .join('circle')
+      .attr('r', nodeRadius)
+      .attr('fill', (d) => nodeFill(d))
+      .attr('stroke', 'rgba(0,0,0,0.45)')
+      .attr('stroke-width', 1)
+      .on('mouseover', (event, d) => {
+        if (dragging) return;
+        showTooltip(event, [
+          d.name,
+          d.date ? 'Date: ' + d.date : 'Date: (unknown)',
+          isFiniteNumber(d.valence) ? 'Valence: ' + d.valence : 'Valence: (unknown)',
+          'Causes: ' + formatCauses(d.causes),
+          d.summary ? 'Summary: ' + d.summary : 'Summary: (none)',
+          'Mentions: ' + formatMentions(d.mentions)
+        ]);
+      })
+      .on('mousemove', (event) => {
+        if (dragging || tooltip.style.display !== 'block') return;
+        positionTooltip(event);
+      })
+      .on('mouseout', hideTooltip);
+
+    const nodeLabel = labelLayer
+      .selectAll('text')
+      .data(graph.nodes, (d) => d.id)
+      .join('text')
+      .attr('font-size', 11)
+      .attr('fill', 'var(--dashboard-fg)')
+      .attr('dominant-baseline', 'middle')
+      .attr('pointer-events', 'none')
+      .text((d) => d.name);
+
+    function resetCausalLinkHighlight() {
+      link
+        .attr('stroke-opacity', defaultLinkOpacity)
+        .attr('stroke-width', defaultLinkWidth);
+    }
+
+    function highlightCausalLinksForNode(nodeId) {
+      link
+        .attr('stroke-opacity', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedLinkOpacity : dimmedLinkOpacity;
+        })
+        .attr('stroke-width', (d) => {
+          const sourceId = linkEndId(d.source);
+          const targetId = linkEndId(d.target);
+          return sourceId === nodeId || targetId === nodeId ? highlightedLinkWidth : dimmedLinkWidth;
+        });
+    }
+
+    const simulation = d3.forceSimulation(graph.nodes)
+      .force('link', d3.forceLink(graph.links).id((d) => d.id).distance(96).strength(0.4))
+      .force('charge', d3.forceManyBody().strength(-185))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('x', d3.forceX(width / 2).strength(0.018))
+      .force('y', d3.forceY(height / 2).strength(0.018))
+      .force('collision', d3.forceCollide(nodeRadius + 7))
+      .on('tick', () => {
+        link
+          .attr('x1', (d) => trimDirectedLink(d).x1)
+          .attr('y1', (d) => trimDirectedLink(d).y1)
+          .attr('x2', (d) => trimDirectedLink(d).x2)
+          .attr('y2', (d) => trimDirectedLink(d).y2);
+
+        node
+          .attr('cx', (d) => d.x)
+          .attr('cy', (d) => d.y);
+
+        nodeLabel
+          .attr('x', (d) => d.x + 10)
+          .attr('y', (d) => d.y);
+      });
+
+    window.addEventListener('resize', () => {
+      setSize();
+      simulation.force('center', d3.forceCenter(width / 2, height / 2));
+      simulation.force('x', d3.forceX(width / 2).strength(0.018));
+      simulation.force('y', d3.forceY(height / 2).strength(0.018));
+      simulation.alpha(0.35).restart();
+      hideTooltip();
+      resetCausalLinkHighlight();
+    });
+
+    const drag = d3.drag()
+      .on('start', (event, d) => {
+        dragging = true;
+        hideTooltip();
+        highlightCausalLinksForNode(d.id);
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on('drag', (event, d) => {
+        hideTooltip();
+        highlightCausalLinksForNode(d.id);
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on('end', (event, d) => {
+        dragging = false;
+        hideTooltip();
+        resetCausalLinkHighlight();
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
       });
 
     node.call(drag);

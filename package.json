@@ -2,7 +2,7 @@
   "name": "burbage",
   "displayName": "Burbage",
   "description": "Entity synchronization assistant for structured text projects.",
-  "version": "0.0.59",
+  "version": "0.0.60",
   "publisher": "jack-local",
   "license": "MIT",
   "engines": {
@@ -20,6 +20,7 @@
     "onCommand:burbage.openTimelineDashboard",
     "onCommand:burbage.openLocationsHierarchyDashboard",
     "onCommand:burbage.openGeographyDashboard",
+    "onCommand:burbage.openCausalDiagramDashboard",
     "onView:burbage.sidebar"
   ],
   "main": "./dist/extension.js",
@@ -74,6 +75,10 @@
       {
         "command": "burbage.openGeographyDashboard",
         "title": "Burbage: Open Geography Dashboard"
+      },
+      {
+        "command": "burbage.openCausalDiagramDashboard",
+        "title": "Burbage: Open Causal Diagram Dashboard"
       }
     ]
   },

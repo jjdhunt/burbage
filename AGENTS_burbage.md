@@ -103,6 +103,7 @@ Structure:
   parties: [<character name>, ...]
   summary: <short prose description>
   valence: <protagonist goodness score, integer>
+  causes: [<event that caused this one>, ...]
 ```
 
 Field definitions:
@@ -113,6 +114,7 @@ Field definitions:
 - `parties` (Optional): list of character/entity keys; if non-empty, must match keys in `Entities/characters.yaml`.
 - `summary` (Required): short prose description.
 - `valence` (Required): subjective 'goodness' score, from the perspective of the protagonist. 1-10, with 1 - worst thing that happens in the Manuscript, 10 - best thing that happens in the Manuscript.
+- `causes` (Optional): list of event(s) that most directly caused this one, or empty if no known, distinct event caused it; if non-empty, must match other keys in `Entities/events.yaml`. May be empty if the event was: a random occurrence (e.g. two people meet by chance), a character's independent decision (e.g. a person spontaneously decides to go for a walk), a periodic/seasonal event (e.g. the sun rose), or the cause is never specified in the Manuscript. Typically, causal relationships should be acyclic and chronological, but this is not strictly enforced because some fictional narratives may violate physical/logical constraints.
 
 ## relationships.yaml
 
