@@ -9,6 +9,50 @@ const execFile = promisify(execFileCb);
 type CommandResult = { stdout: string; stderr: string };
 const DEFAULT_SYNC_PROMPT =
   "Synchronize the project entities with the Manuscript. Go ahead and apply needed file updates directly.";
+const DASHBOARD_COLOR_SCHEME = {
+  categoricalPalette: [
+    "#4e79a7",
+    "#f28e2b",
+    "#e15759",
+    "#76b7b2",
+    "#59a14f",
+    "#edc948",
+    "#b07aa1",
+    "#ff9da7",
+    "#9c755f",
+    "#bab0ab",
+    "#8dd3c7",
+    "#ffffb3",
+    "#bebada",
+    "#fb8072",
+    "#80b1d3",
+    "#fdb462",
+    "#b3de69",
+    "#fccde5",
+    "#d9d9d9",
+    "#bc80bd",
+    "#ccebc5",
+    "#ffed6f"
+  ],
+  relationship: {
+    link: "#7a7a7a"
+  },
+  timeline: {
+    eventNode: "#d7a12f",
+    locationNode: "#10b981",
+    documentNode: "#5d92c9",
+    backbone: "#7b7b7b",
+    partyLink: "#7a7a7a",
+    mentionLink: "#6f85a1"
+  },
+  location: {
+    regionLink: "#9b8c57",
+    adjacentLink: "#6f85a1"
+  },
+  causal: {
+    fallbackChain: "#86a5c5"
+  }
+} as const;
 
 export function activate(context: vscode.ExtensionContext): void {
   const sidebarProvider = new BurbageSidebarProvider(context);
@@ -100,6 +144,8 @@ type TimelineGraphNode = {
   bio?: string;
   date?: string;
   summary?: string;
+  causes?: string[];
+  explaination?: string;
 };
 
 type TimelineGraphLink = {
@@ -144,6 +190,7 @@ type CausalEventNode = {
   mentions: string[];
   date: string;
   summary: string;
+  explaination: string;
   valence?: number;
   causes: string[];
 };
@@ -401,6 +448,7 @@ function buildRelationshipGraph(
 
 function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: DashboardHtmlOptions = {}): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
   const includeSaveButton = options.includeSaveButton ?? true;
   const standaloneDarkMode = options.standaloneDarkMode ?? false;
   const rootCssVars = standaloneDarkMode
@@ -523,6 +571,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
@@ -557,7 +606,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
     });
 
     const types = Array.from(new Set(graph.nodes.map((node) => node.type || 'Unknown'))).sort();
-    const palette = [...d3.schemeTableau10, ...d3.schemeSet3];
+    const palette = dashboardColors.categoricalPalette;
     const color = d3.scaleOrdinal(types, palette);
 
     function hideTooltip() {
@@ -588,6 +637,13 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
       return mentions.join(', ');
     }
 
+    function formatCauses(causes) {
+      if (!Array.isArray(causes) || causes.length === 0) {
+        return '(none)';
+      }
+      return causes.join(', ');
+    }
+
     function renderLegend() {
       legend.innerHTML = '';
       const title = document.createElement('div');
@@ -612,7 +668,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
     renderLegend();
 
     const container = svg.append('g');
-    const linkLayer = container.append('g').attr('stroke', '#7a7a7a').attr('stroke-opacity', 0.7);
+    const linkLayer = container.append('g').attr('stroke', dashboardColors.relationship.link).attr('stroke-opacity', 0.7);
     const nodeLayer = container.append('g');
     const labelLayer = container.append('g');
     const defaultLinkOpacity = 0.7;
@@ -1364,7 +1420,12 @@ function buildTimelineGraph(
       meanEventIndex: eventIndex,
       eventIndex,
       date: asOptionalString(event["date"]) ?? "",
-      summary: asOptionalString(event["summary"]) ?? ""
+      summary: asOptionalString(event["summary"]) ?? "",
+      causes: toUniqueStrings([
+        ...asStringArray(event["causes"]),
+        ...(asOptionalString(event["cause"]) ? [asOptionalString(event["cause"]) as string] : [])
+      ]),
+      explaination: asOptionalString(event["explaination"]) ?? asOptionalString(event["explanation"]) ?? ""
     });
 
     for (const partyName of eventParties) {
@@ -1474,6 +1535,7 @@ function buildTimelineGraph(
 
 function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHtmlOptions = {}): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
   const includeSaveButton = options.includeSaveButton ?? true;
   const standaloneDarkMode = options.standaloneDarkMode ?? false;
   const rootCssVars = standaloneDarkMode
@@ -1599,6 +1661,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
@@ -1640,7 +1703,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
     if (types.length === 0) {
       types.push('Unknown');
     }
-    const palette = [...d3.schemeTableau10, ...d3.schemeSet3];
+    const palette = dashboardColors.categoricalPalette;
     const characterColor = d3.scaleOrdinal(types, palette);
 
     function clamp(value, min, max) {
@@ -1718,15 +1781,15 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
 
     function nodeFill(node) {
       if (node.nodeKind === 'event') {
-        return '#d7a12f';
+        return dashboardColors.timeline.eventNode;
       }
       if (node.nodeKind === 'character') {
         return characterColor(node.characterType || 'Unknown');
       }
       if (node.nodeKind === 'location') {
-        return '#029155';
+        return dashboardColors.timeline.locationNode;
       }
-      return '#5d92c9';
+      return dashboardColors.timeline.documentNode;
     }
 
     function nodeRadius(node) {
@@ -1779,9 +1842,9 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
       legend.appendChild(nodeKindsTitle);
 
       const nodeKindRows = [
-        { label: 'Event', color: '#d7a12f' },
-        { label: 'Location', color: '#10b981' },
-        { label: 'Document', color: '#5d92c9' }
+        { label: 'Event', color: dashboardColors.timeline.eventNode },
+        { label: 'Location', color: dashboardColors.timeline.locationNode },
+        { label: 'Document', color: dashboardColors.timeline.documentNode }
       ];
       for (const item of nodeKindRows) {
         const row = document.createElement('div');
@@ -1831,7 +1894,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
       .attr('orient', 'auto')
       .append('path')
       .attr('d', 'M0,-5L10,0L0,5')
-      .attr('fill', '#7b7b7b');
+      .attr('fill', dashboardColors.timeline.backbone);
 
     const container = svg.append('g');
     const backboneEdgeLayer = container.append('g');
@@ -1854,7 +1917,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
       .selectAll('line')
       .data(eventBackboneLinks, (d) => d.id)
       .join('line')
-      .attr('stroke', '#7b7b7b')
+      .attr('stroke', dashboardColors.timeline.backbone)
       .attr('stroke-opacity', defaultBackboneOpacity)
       .attr('stroke-width', defaultBackboneWidth)
       .attr('stroke-linecap', 'round')
@@ -1947,7 +2010,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
       .selectAll('path')
       .data(graph.links, (d) => d.id)
       .join('path')
-      .attr('stroke', (d) => (d.linkKind === 'mention' ? '#6f85a1' : '#7a7a7a'))
+      .attr('stroke', (d) => (d.linkKind === 'mention' ? dashboardColors.timeline.mentionLink : dashboardColors.timeline.partyLink))
       .attr('stroke-opacity', defaultTimelineLinkOpacity)
       .attr('stroke-width', defaultTimelineLinkWidth)
       .on('mouseover', (event, d) => {
@@ -1985,6 +2048,8 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
           showTooltip(event, [
             d.name,
             d.date ? 'Date: ' + d.date : 'Date: (unknown)',
+            'Causes: ' + formatCauses(d.causes),
+            d.explaination ? 'Explaination: ' + d.explaination : 'Explaination: (none)',
             d.summary ? 'Summary: ' + d.summary : 'Summary: (none)',
             'Mentions: ' + formatMentions(d.mentions)
           ]);
@@ -2209,6 +2274,7 @@ function buildCausalGraph(eventsDocument: unknown, sourceLabel: string): CausalG
       mentions: toUniqueStrings(asStringArray(event["mentions"])),
       date: asOptionalString(event["date"]) ?? "",
       summary: asOptionalString(event["summary"]) ?? "",
+      explaination: asOptionalString(event["explaination"]) ?? asOptionalString(event["explanation"]) ?? "",
       valence: parseValence(event["valence"]),
       causes
     });
@@ -2241,6 +2307,7 @@ function buildCausalGraph(eventsDocument: unknown, sourceLabel: string): CausalG
 
 function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOptions = {}): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
   const includeSaveButton = options.includeSaveButton ?? true;
   const standaloneDarkMode = options.standaloneDarkMode ?? false;
   const rootCssVars = standaloneDarkMode
@@ -2363,6 +2430,7 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
@@ -2382,12 +2450,32 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
     let dragging = false;
     const nodeRadius = 8.8;
     const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+    const linkIdByNodeId = new Map(graph.nodes.map((node) => [node.id, { incoming: [], outgoing: [] }]));
+    for (const linkDatum of graph.links) {
+      const sourceId = linkEndId(linkDatum.source);
+      const targetId = linkEndId(linkDatum.target);
+      if (linkIdByNodeId.has(sourceId)) {
+        linkIdByNodeId.get(sourceId).outgoing.push(linkDatum);
+      }
+      if (linkIdByNodeId.has(targetId)) {
+        linkIdByNodeId.get(targetId).incoming.push(linkDatum);
+      }
+    }
     const defaultLinkOpacity = 0.7;
     const defaultLinkWidth = 1.6;
     const dimmedLinkOpacity = 0.14;
     const dimmedLinkWidth = 1.0;
     const highlightedLinkOpacity = 1;
     const highlightedLinkWidth = 2.8;
+    let chainColorSeed = 0;
+    const nodeChainColorById = new Map();
+    const causalChainPalette = dashboardColors.categoricalPalette;
+
+    function nextChainColor() {
+      const color = causalChainPalette[chainColorSeed % causalChainPalette.length] || dashboardColors.causal.fallbackChain;
+      chainColorSeed += 1;
+      return color;
+    }
 
     function setSize() {
       const rect = document.body.getBoundingClientRect();
@@ -2404,12 +2492,52 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       return typeof value === 'number' && Number.isFinite(value);
     }
 
-    function nodeFill(node) {
-      if (!isFiniteNumber(node.valence)) {
-        return '#7d8590';
+    function ensureNodeChainColor(nodeId, visiting = new Set()) {
+      if (nodeChainColorById.has(nodeId)) {
+        return nodeChainColorById.get(nodeId);
       }
-      const normalized = (clamp(node.valence, 1, 10) - 1) / 9;
-      return d3.interpolateRdYlGn(normalized);
+
+      if (visiting.has(nodeId)) {
+        const cycleColor = nextChainColor();
+        nodeChainColorById.set(nodeId, cycleColor);
+        return cycleColor;
+      }
+
+      visiting.add(nodeId);
+      const nodeLinks = linkIdByNodeId.get(nodeId) || { incoming: [], outgoing: [] };
+      const incoming = nodeLinks.incoming;
+
+      let color;
+      if (incoming.length !== 1) {
+        color = nextChainColor();
+      } else {
+        const parentId = linkEndId(incoming[0].source);
+        const parentColor = ensureNodeChainColor(parentId, visiting);
+        const parentLinks = linkIdByNodeId.get(parentId) || { incoming: [], outgoing: [] };
+        color = parentLinks.outgoing.length > 1 ? nextChainColor() : parentColor;
+      }
+
+      nodeChainColorById.set(nodeId, color);
+      visiting.delete(nodeId);
+      return color;
+    }
+
+    for (const nodeDatum of graph.nodes) {
+      ensureNodeChainColor(nodeDatum.id);
+    }
+
+    function nodeFill(node) {
+      return nodeChainColorById.get(node.id) || '#7d8590';
+    }
+
+    function linkStrokeColor(linkDatum) {
+      const sourceId = linkEndId(linkDatum.source);
+      const targetId = linkEndId(linkDatum.target);
+      const targetLinks = linkIdByNodeId.get(targetId) || { incoming: [], outgoing: [] };
+      const chainColor = targetLinks.incoming.length > 1
+        ? (nodeChainColorById.get(sourceId) || dashboardColors.causal.fallbackChain)
+        : (nodeChainColorById.get(targetId) || nodeChainColorById.get(sourceId) || dashboardColors.causal.fallbackChain);
+      return chainColor;
     }
 
     function hideTooltip() {
@@ -2485,13 +2613,13 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       legend.innerHTML = '';
       const title = document.createElement('div');
       title.className = 'legend-title';
-      title.textContent = 'Event Valence';
+      title.textContent = 'Causal Chain Coloring';
       legend.appendChild(title);
 
       const rows = [
-        { label: 'Low (1)', color: d3.interpolateRdYlGn(0) },
-        { label: 'High (10)', color: d3.interpolateRdYlGn(1) },
-        { label: 'Unknown', color: '#7d8590' }
+        { label: 'Single-cause chain: color continues downstream', color: nextChainColor() },
+        { label: 'Intersection (multiple causes): event gets a new color', color: nextChainColor() },
+        { label: 'Branch (multiple effects): each effect starts a new color', color: nextChainColor() }
       ];
       for (const rowData of rows) {
         const row = document.createElement('div');
@@ -2522,7 +2650,7 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       .attr('orient', 'auto')
       .append('path')
       .attr('d', 'M0,-5L10,0L0,5')
-      .attr('fill', '#86a5c5');
+      .attr('fill', 'context-stroke');
 
     const container = svg.append('g');
     const linkLayer = container.append('g').attr('fill', 'none');
@@ -2542,7 +2670,7 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       .selectAll('line')
       .data(graph.links, (d) => d.id)
       .join('line')
-      .attr('stroke', '#86a5c5')
+      .attr('stroke', (d) => linkStrokeColor(d))
       .attr('stroke-opacity', defaultLinkOpacity)
       .attr('stroke-width', defaultLinkWidth)
       .attr('marker-end', 'url(#' + markerId + ')')
@@ -2573,6 +2701,7 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
           d.date ? 'Date: ' + d.date : 'Date: (unknown)',
           isFiniteNumber(d.valence) ? 'Valence: ' + d.valence : 'Valence: (unknown)',
           'Causes: ' + formatCauses(d.causes),
+          d.explaination ? 'Explaination: ' + d.explaination : 'Explaination: (none)',
           d.summary ? 'Summary: ' + d.summary : 'Summary: (none)',
           'Mentions: ' + formatMentions(d.mentions)
         ]);
@@ -2773,6 +2902,7 @@ function getLocationsDashboardHtml(
   options: DashboardHtmlOptions = {}
 ): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
   const includeSaveButton = options.includeSaveButton ?? true;
   const standaloneDarkMode = options.standaloneDarkMode ?? false;
   const rootCssVars = standaloneDarkMode
@@ -2896,6 +3026,7 @@ function getLocationsDashboardHtml(
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
@@ -2916,9 +3047,9 @@ function getLocationsDashboardHtml(
     let dragging = false;
     const isHierarchyMode = locationMode === 'hierarchy';
     const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
-    const palette = [...d3.schemeTableau10, ...d3.schemeSet3];
-    const regionLinkColor = '#9b8c57';
-    const adjacentLinkColor = '#6f85a1';
+    const palette = dashboardColors.categoricalPalette;
+    const regionLinkColor = dashboardColors.location.regionLink;
+    const adjacentLinkColor = dashboardColors.location.adjacentLink;
     const regionLinkStrength = 0.21;
     const adjacentLinkStrength = regionLinkStrength / 5;
     const dimmedLinkOpacity = locationMode === 'hierarchy' ? 0.16 : 0.06;
