@@ -9,7 +9,7 @@ Burbage is a VS Code extension for structured text projects (fiction or non-fict
 
 Primary project dirs:
 - `Manuscript/` (source corpus)
-- `Entities/` (`characters.yaml`, `locations.yaml`, `events.yaml`, `relationships.yaml`)
+- `Entities/` (`documents.yaml`, `characters.yaml`, `locations.yaml`, `geography.yaml`, `events.yaml`, `relationships.yaml`)
 
 ## Current Repo Snapshot (Ground Truth)
 
@@ -38,8 +38,10 @@ Behavior:
   - `Manuscript/`
   - `Entities/`
   - `.vscode/`
+  - `Entities/documents.yaml`
   - `Entities/characters.yaml`
   - `Entities/locations.yaml`
+  - `Entities/geography.yaml`
   - `Entities/events.yaml`
   - `Entities/relationships.yaml`
 - Initializes git repo if `.git/` is missing.

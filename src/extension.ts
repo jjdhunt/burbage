@@ -767,6 +767,7 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
       .text((d) => d.name);
 
     const simulation = d3.forceSimulation(graph.nodes)
+      .alphaDecay(0.0023)
       .force('link', d3.forceLink(graph.links).id((d) => d.id).distance(82).strength(0.35))
       .force('charge', d3.forceManyBody().strength(-130))
       .force('center', d3.forceCenter(width / 2, height / 2))
@@ -869,7 +870,13 @@ async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<
     });
     context.subscriptions.push(messageDisposable);
 
-    for (const relativePath of ["Entities/characters.yaml", "Entities/locations.yaml", "Entities/events.yaml", "Manuscript/**"]) {
+    for (const relativePath of [
+      "Entities/characters.yaml",
+      "Entities/locations.yaml",
+      "Entities/events.yaml",
+      "Entities/documents.yaml",
+      "Manuscript/**"
+    ]) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
       const schedule = () => scheduleTimelineDashboardRefresh(state);
       watcher.onDidChange(schedule);
@@ -1288,10 +1295,12 @@ async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphDa
   const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
   const charactersPath = path.join(sources.entitiesDirPath, "characters.yaml");
   const locationsPath = path.join(sources.entitiesDirPath, "locations.yaml");
-  const [eventsRaw, charactersRaw, locationsRaw, manuscriptDocuments] = await Promise.all([
+  const documentsPath = path.join(sources.entitiesDirPath, "documents.yaml");
+  const [eventsRaw, charactersRaw, locationsRaw, documentsRaw, manuscriptDocuments] = await Promise.all([
     fs.readFile(eventsPath, "utf8"),
     fs.readFile(charactersPath, "utf8"),
     pathExists(locationsPath).then((exists) => (exists ? fs.readFile(locationsPath, "utf8") : "{}\n")),
+    pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
 
@@ -1299,6 +1308,7 @@ async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphDa
     parseYaml(eventsRaw),
     parseYaml(charactersRaw),
     parseYaml(locationsRaw),
+    parseYaml(documentsRaw),
     manuscriptDocuments,
     sources.sourceLabel
   );
@@ -1329,12 +1339,14 @@ function buildTimelineGraph(
   eventsDocument: unknown,
   charactersDocument: unknown,
   locationsDocument: unknown,
+  documentsDocument: unknown,
   manuscriptDocuments: string[],
   sourceLabel: string
 ): TimelineGraphData {
   const eventsRecord = asRecord(eventsDocument);
   const charactersRecord = asRecord(charactersDocument);
   const locationsRecord = asRecord(locationsDocument);
+  const documentsRecord = asRecord(documentsDocument);
   const eventEntries = Object.entries(eventsRecord);
   const knownCharacters = new Set(Object.keys(charactersRecord));
   const knownLocations = new Set(Object.keys(locationsRecord));
@@ -1391,6 +1403,40 @@ function buildTimelineGraph(
 
     return undefined;
   };
+  const resolveDocumentRecordName = (documentReference: string): string | undefined => {
+    const normalizedDocumentReference = normalizeDocumentReference(documentReference);
+    if (!normalizedDocumentReference) {
+      return undefined;
+    }
+
+    const exact = documentsByLower.get(normalizedDocumentReference.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+
+    const basenameLower = path.posix.basename(normalizedDocumentReference).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    if (basenameMatches.length === 1) {
+      return basenameMatches[0];
+    }
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    if (stemMatches.length === 1) {
+      return stemMatches[0];
+    }
+
+    return undefined;
+  };
+  const documentSummaryByName = new Map<string, string>();
+  for (const [documentRecordName, documentRecordValue] of Object.entries(documentsRecord)) {
+    const resolvedDocumentName = resolveDocumentRecordName(documentRecordName);
+    if (!resolvedDocumentName) {
+      continue;
+    }
+    const documentRecord = asRecord(documentRecordValue);
+    documentSummaryByName.set(resolvedDocumentName, asOptionalString(documentRecord["summary"]) ?? "");
+  }
 
   const characterEventMap = new Map<string, Set<number>>();
   const locationEventMap = new Map<string, Set<number>>();
@@ -1522,7 +1568,8 @@ function buildTimelineGraph(
       mentions: [documentName],
       connectedEventSpan: connected.span,
       connectedEventCount: connected.count,
-      meanEventIndex: connected.meanIndex
+      meanEventIndex: connected.meanIndex,
+      summary: documentSummaryByName.get(documentName) ?? ""
     });
   }
 
@@ -2081,7 +2128,8 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
         showTooltip(event, [
           d.name,
           'Connected event span: ' + (d.connectedEventSpan + 1),
-          'Linked events: ' + d.connectedEventCount
+          'Linked events: ' + d.connectedEventCount,
+          d.summary ? 'Summary: ' + d.summary : 'Summary: (none)'
         ]);
       })
       .on('mousemove', (event) => {
@@ -2156,6 +2204,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
       .strength(0.08);
 
     const simulation = d3.forceSimulation(graph.nodes)
+      .alphaDecay(0.0023)
       .velocityDecay(0.45)
       .force('link', linkForce)
       .force(
@@ -2530,6 +2579,21 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       return nodeChainColorById.get(node.id) || '#7d8590';
     }
 
+    function isCauselessNode(node) {
+      return !Array.isArray(node.causes) || node.causes.length === 0;
+    }
+
+    function nodeStroke(node) {
+      if (isCauselessNode(node)) {
+        return nodeFill(node);
+      }
+      return 'rgba(0,0,0,0.45)';
+    }
+
+    function nodeStrokeWidth(node) {
+      return isCauselessNode(node) ? 2 : 1;
+    }
+
     function linkStrokeColor(linkDatum) {
       const sourceId = linkEndId(linkDatum.source);
       const targetId = linkEndId(linkDatum.target);
@@ -2691,9 +2755,9 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       .data(graph.nodes, (d) => d.id)
       .join('circle')
       .attr('r', nodeRadius)
-      .attr('fill', (d) => nodeFill(d))
-      .attr('stroke', 'rgba(0,0,0,0.45)')
-      .attr('stroke-width', 1)
+      .attr('fill', (d) => (isCauselessNode(d) ? 'none' : nodeFill(d)))
+      .attr('stroke', (d) => nodeStroke(d))
+      .attr('stroke-width', (d) => nodeStrokeWidth(d))
       .on('mouseover', (event, d) => {
         if (dragging) return;
         showTooltip(event, [
@@ -2743,6 +2807,7 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
     }
 
     const simulation = d3.forceSimulation(graph.nodes)
+      .alphaDecay(0.0023)
       .force('link', d3.forceLink(graph.links).id((d) => d.id).distance(96).strength(0.4))
       .force('charge', d3.forceManyBody().strength(-185))
       .force('center', d3.forceCenter(width / 2, height / 2))
@@ -3306,6 +3371,7 @@ function getLocationsDashboardHtml(
     }
 
     const simulation = d3.forceSimulation(graph.nodes)
+      .alphaDecay(0.0023)
       .force(
         'link',
         d3
@@ -3394,6 +3460,7 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "geography.yaml"), "{}\n", summary, workspaceRoot);
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "events.yaml"), "{}\n", summary, workspaceRoot);
   await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "relationships.yaml"), "{}\n", summary, workspaceRoot);
+  await ensureFileIfMissing(path.join(workspaceRoot, "Entities", "documents.yaml"), "{}\n", summary, workspaceRoot);
 
   await ensureGitRepo(workspaceRoot, summary);
 

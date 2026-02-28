@@ -3,6 +3,7 @@
 - A project has the following components that should be kept in sync:
   - The Manuscript (in `Manuscript/`) is a collection of ground-truth documents. You may never modify it unless explicitly told to, and even then you may only make minimal edits.
   - The Entities:
+    - The Documents (in `Entities/documents.yaml`) store one summary record per Manuscript document.
     - The Characters (in `Entities/characters.yaml`) are all of the unique individuals, groups, organizations, polities, or other entities with agency or narrative relevance in the Manuscript.
     - The Locations (in `Entities/locations.yaml`) are all of the unique physical, imaginary, conceptual, or mental places mentioned in the Manuscript.
     - The Geography (in `Entities/geography.yaml`) is the set of direct geographic connections between locations in `Entities/locations.yaml`.
@@ -37,11 +38,29 @@ All extracted data is stored in separate YAML files in `Entities/` using a consi
 - Files should not include `#` comments
 - Schema templates below use angle-bracket placeholders (for example `<event title>`) to indicate required structure, not literal values.
 - Optional fields can be left empty (`null` or `[]`) if unknown.
-- Non-empty entity cross-references must exactly match entity keys.
+- Non-empty entity cross-references must exactly match keys in the referenced YAML file.
+- Non-empty document references in `mentions` must exactly match keys in `documents.yaml`.
 - No additional top-level wrapper keys (for example do not wrap in `events:`).
 - Avoid unnecessary quoting unless required by YAML syntax.
 - Keep entries compact and human-readable.
 - It is possible that the files may violate valid YAML syntax due to user manual editing. If you detect this, you should do your best to fix things.
+
+## documents.yaml
+
+Purpose: stores summaries of each Manuscript document.
+
+Structure:
+
+```yaml
+<document name>:
+  summary: <short summary>
+  index: <integer document order index>
+```
+
+Field definitions:
+
+- `summary` (Required): concise factual summary of the document's content.
+- `index` (Required): the chapter number if it exists, or the alphabetical order if not.
 
 ## characters.yaml
 
@@ -168,4 +187,4 @@ Field definitions:
 
 # Additional Instructions
 
-- When one or more documents are added to the Manuscript for the first time, there can be a lot of work to do. It is best to update the Entities in this order: Characters, Locations, Geography, Events, Relationships. As you progress through updating each, you might need to go back to update a previous Entity YAML (e.g. to add a missed Location where an Event takes place). You must read the entirety of each new Manuscript document. Proceed carefully; getting things right the first time will make it easy to update based on small diffs later. 
+- When one or more documents are added to the Manuscript for the first time, there can be a lot of work to do. It is best to update the Entities in this order: Documents, Characters, Locations, Geography, Events, Relationships. As you progress through updating each, you might need to go back to update a previous Entity YAML (e.g. to add a missed Location where an Event takes place). You must read the entirety of each new Manuscript document. Proceed carefully; getting things right the first time will make it easy to update based on small diffs later. 
