@@ -79,9 +79,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("burbage.openTimelineDashboard", async () => {
       await openTimelineDashboard(context);
     }),
-    vscode.commands.registerCommand("burbage.openDocumentTimelineDashboard", async () => {
-      await openDocumentTimelineDashboard(context);
-    }),
     vscode.commands.registerCommand("burbage.openLocationsHierarchyDashboard", async () => {
       await openLocationsHierarchyDashboard(context);
     }),
@@ -843,10 +840,6 @@ function getTimelineDashboardMeta(mode: TimelineDashboardMode): {
 }
 
 async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<void> {
-  await openTimelineDashboardByMode(context, "event");
-}
-
-async function openDocumentTimelineDashboard(context: vscode.ExtensionContext): Promise<void> {
   await openTimelineDashboardByMode(context, "document");
 }
 

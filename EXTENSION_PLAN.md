@@ -22,8 +22,7 @@ Current command surface (`package.json`):
 - `burbage.openChat`
 - `burbage.loginCodex`
 - `burbage.openRelationshipDashboard`
-- `burbage.openTimelineDashboard` (Event Timeline)
-- `burbage.openDocumentTimelineDashboard` (Document Timeline)
+- `burbage.openTimelineDashboard`
 - `burbage.openLocationsHierarchyDashboard`
 - `burbage.openGeographyDashboard`
 - `burbage.openCausalDiagramDashboard`
