@@ -247,10 +247,7 @@ type DashboardHtmlOptions = {
 
 let relationshipDashboardState: RelationshipDashboardState | undefined;
 let causalDashboardState: CausalDashboardState | undefined;
-const timelineDashboardStates: Record<TimelineDashboardMode, TimelineDashboardState | undefined> = {
-  event: undefined,
-  document: undefined
-};
+let timelineDashboardState: TimelineDashboardState | undefined;
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -831,22 +828,16 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
 
 function getTimelineDashboardMeta(mode: TimelineDashboardMode): {
   modeTitle: string;
-  panelViewType: string;
-  panelTitle: string;
   saveFileName: string;
 } {
   if (mode === "document") {
     return {
       modeTitle: "Document Timeline",
-      panelViewType: "burbage.documentTimelineDashboard",
-      panelTitle: "Burbage: Document Timeline",
       saveFileName: "document-timeline-dashboard.html"
     };
   }
   return {
     modeTitle: "Event Timeline",
-    panelViewType: "burbage.eventTimelineDashboard",
-    panelTitle: "Burbage: Event Timeline",
     saveFileName: "event-timeline-dashboard.html"
   };
 }
@@ -864,31 +855,32 @@ async function openTimelineDashboardByMode(
   mode: TimelineDashboardMode
 ): Promise<void> {
   try {
-    const dashboardMeta = getTimelineDashboardMeta(mode);
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
-      vscode.window.showErrorMessage(`Open a folder/workspace before opening the ${dashboardMeta.modeTitle.toLowerCase()}.`);
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the timeline dashboard.");
       return;
     }
     const workspaceRoot = workspaceFolder.uri.fsPath;
 
-    const timelineDashboardState = timelineDashboardStates[mode];
     if (timelineDashboardState && timelineDashboardState.workspaceRoot === workspaceRoot) {
       timelineDashboardState.panel.reveal(vscode.ViewColumn.One, true);
-      await refreshTimelineDashboard(timelineDashboardState, true);
+      if (timelineDashboardState.mode !== mode) {
+        timelineDashboardState.mode = mode;
+        await timelineDashboardState.panel.webview.postMessage({ type: "setTimelineMode", mode });
+      }
       return;
     }
 
     if (timelineDashboardState) {
       disposeTimelineDashboardState(timelineDashboardState);
-      timelineDashboardStates[mode] = undefined;
+      timelineDashboardState = undefined;
     }
 
     const graph = await loadTimelineGraph(workspaceRoot);
 
     const panel = vscode.window.createWebviewPanel(
-      dashboardMeta.panelViewType,
-      dashboardMeta.panelTitle,
+      "burbage.timelineDashboard",
+      "Burbage: Timeline Dashboard",
       vscode.ViewColumn.One,
       {
         enableScripts: true,
@@ -903,15 +895,18 @@ async function openTimelineDashboardByMode(
       mode,
       watchers: []
     };
-    timelineDashboardStates[mode] = state;
+    timelineDashboardState = state;
 
     panel.webview.html = getTimelineDashboardHtml(graph, mode);
 
     const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
-      if (!isSaveDashboardMessage(message)) {
+      if (isSaveDashboardMessage(message)) {
+        await saveTimelineDashboardSnapshot(state);
         return;
       }
-      await saveTimelineDashboardSnapshot(state);
+      if (isTimelineModeChangedMessage(message)) {
+        state.mode = message.mode;
+      }
     });
     context.subscriptions.push(messageDisposable);
 
@@ -932,20 +927,19 @@ async function openTimelineDashboardByMode(
     }
 
     panel.onDidDispose(() => {
-      if (timelineDashboardStates[mode] === state) {
-        timelineDashboardStates[mode] = undefined;
+      if (timelineDashboardState === state) {
+        timelineDashboardState = undefined;
       }
       disposeTimelineDashboardState(state);
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const dashboardMeta = getTimelineDashboardMeta(mode);
-    vscode.window.showErrorMessage(`Could not open ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
+    vscode.window.showErrorMessage(`Could not open timeline dashboard: ${message}`);
   }
 }
 
 function scheduleTimelineDashboardRefresh(state: TimelineDashboardState): void {
-  if (timelineDashboardStates[state.mode] !== state) {
+  if (timelineDashboardState !== state) {
     return;
   }
   if (state.refreshTimer) {
@@ -957,7 +951,7 @@ function scheduleTimelineDashboardRefresh(state: TimelineDashboardState): void {
 }
 
 async function refreshTimelineDashboard(state: TimelineDashboardState, showErrorToUser: boolean): Promise<void> {
-  if (timelineDashboardStates[state.mode] !== state) {
+  if (timelineDashboardState !== state) {
     return;
   }
   try {
@@ -969,8 +963,7 @@ async function refreshTimelineDashboard(state: TimelineDashboardState, showError
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    const dashboardMeta = getTimelineDashboardMeta(state.mode);
-    vscode.window.showErrorMessage(`Could not refresh ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
+    vscode.window.showErrorMessage(`Could not refresh timeline dashboard: ${message}`);
   }
 }
 
@@ -1722,6 +1715,10 @@ function getTimelineDashboardHtml(
       --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
       --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
   const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
+  const modeToggleHtml = `<div class="mode-toggle" role="group" aria-label="Timeline mode">
+    <button id="mode-event" class="mode-button" type="button">Event Timeline</button>
+    <button id="mode-document" class="mode-button" type="button">Document Timeline</button>
+  </div>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -1813,10 +1810,37 @@ function getTimelineDashboardHtml(
       font: inherit;
       cursor: pointer;
     }
+    .mode-toggle {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 120;
+      display: inline-flex;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 8px;
+    }
+    .mode-button {
+      border: 1px solid var(--dashboard-border);
+      background: transparent;
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .mode-button.active {
+      background: rgba(120, 170, 220, 0.25);
+      border-color: rgba(120, 170, 220, 0.75);
+    }
   </style>
 </head>
 <body>
   ${saveButtonHtml}
+  ${modeToggleHtml}
   <div class="root">
     <svg id="graph"></svg>
   </div>
@@ -1825,14 +1849,34 @@ function getTimelineDashboardHtml(
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
-    const timelineMode = ${timelineModeJson};
-    const isDocumentTimeline = timelineMode === 'document';
+    const initialTimelineMode = ${timelineModeJson};
     const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
     const legend = document.getElementById('legend');
     const saveButton = document.getElementById('save-dashboard');
+    const modeEventButton = document.getElementById('mode-event');
+    const modeDocumentButton = document.getElementById('mode-document');
+    let currentTimelineMode = initialTimelineMode;
+
+    function isDocumentTimelineMode() {
+      return currentTimelineMode === 'document';
+    }
+
+    function isTimelineMode(value) {
+      return value === 'event' || value === 'document';
+    }
+
+    function updateModeButtons() {
+      if (modeEventButton) {
+        modeEventButton.classList.toggle('active', currentTimelineMode === 'event');
+      }
+      if (modeDocumentButton) {
+        modeDocumentButton.classList.toggle('active', currentTimelineMode === 'document');
+      }
+    }
+
     if (saveButton && vscodeApi) {
       saveButton.addEventListener('click', () => {
         vscodeApi.postMessage({ type: 'saveDashboard' });
@@ -1841,6 +1885,23 @@ function getTimelineDashboardHtml(
     if (saveButton && !vscodeApi) {
       saveButton.style.display = 'none';
     }
+    if (modeEventButton) {
+      modeEventButton.addEventListener('click', () => {
+        switchTimelineMode('event');
+      });
+    }
+    if (modeDocumentButton) {
+      modeDocumentButton.addEventListener('click', () => {
+        switchTimelineMode('document');
+      });
+    }
+    window.addEventListener('message', (event) => {
+      const message = event.data;
+      if (!message || message.type !== 'setTimelineMode' || !isTimelineMode(message.mode)) {
+        return;
+      }
+      switchTimelineMode(message.mode, true);
+    });
     const aspect = 0.5;
     let width = 0;
     let height = 0;
@@ -1864,26 +1925,35 @@ function getTimelineDashboardHtml(
       }
       return a.name.localeCompare(b.name);
     });
-    const backboneNodes = isDocumentTimeline ? orderedDocumentNodes : eventNodes;
-    const backboneNodeKind = isDocumentTimeline ? 'document' : 'event';
-    const backboneCount = backboneNodes.length;
-    const backboneLinks = backboneNodes.slice(0, -1).map((sourceNode, index) => ({
-      id: 'backbone:' + index,
-      source: sourceNode,
-      target: backboneNodes[index + 1]
-    }));
-    const documentBackboneIndexByName = new Map(backboneNodes.map((node, index) => [node.name, index]));
+    let backboneNodes = [];
+    let backboneCount = 0;
+    let backboneLinks = [];
+    let documentBackboneIndexByName = new Map();
+    let visibleLinks = [];
     const eventCenterIndex = eventCount <= 1 ? 0 : (eventCount - 1) / 2;
-    const backboneCenterIndex = backboneCount <= 1 ? 0 : (backboneCount - 1) / 2;
+    let backboneCenterIndex = 0;
     const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
     const characterLikeNodes = graph.nodes.filter((node) => node.nodeKind === 'character' || node.nodeKind === 'location');
     const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
-    const visibleLinks = isDocumentTimeline
-      ? graph.links.filter((link) => link.linkKind !== 'party' && link.linkKind !== 'location')
-      : graph.links.filter((link) => link.linkKind !== 'documentParty' && link.linkKind !== 'documentLocation');
+
+    function recomputeModeState() {
+      const useDocumentTimeline = isDocumentTimelineMode();
+      backboneNodes = useDocumentTimeline ? orderedDocumentNodes : eventNodes;
+      backboneCount = backboneNodes.length;
+      backboneLinks = backboneNodes.slice(0, -1).map((sourceNode, index) => ({
+        id: 'backbone:' + index,
+        source: sourceNode,
+        target: backboneNodes[index + 1]
+      }));
+      documentBackboneIndexByName = new Map(backboneNodes.map((node, index) => [node.name, index]));
+      backboneCenterIndex = backboneCount <= 1 ? 0 : (backboneCount - 1) / 2;
+      visibleLinks = useDocumentTimeline
+        ? graph.links.filter((link) => link.linkKind !== 'party' && link.linkKind !== 'location')
+        : graph.links.filter((link) => link.linkKind !== 'documentParty' && link.linkKind !== 'documentLocation');
+    }
 
     function isBackboneNode(node) {
-      return node.nodeKind === backboneNodeKind;
+      return isDocumentTimelineMode() ? node.nodeKind === 'document' : node.nodeKind === 'event';
     }
 
     function mapEventIndexToBackboneIndex(eventIndex) {
@@ -1894,7 +1964,7 @@ function getTimelineDashboardHtml(
     }
 
     function getNodeBackboneMetrics(node) {
-      if (isDocumentTimeline && node.nodeKind === 'character') {
+      if (isDocumentTimelineMode() && node.nodeKind === 'character') {
         const partyDocumentIndices = visibleLinks
           .filter((link) => link.linkKind === 'documentParty' && link.source === node.id)
           .map((link) => {
@@ -1915,7 +1985,7 @@ function getTimelineDashboardHtml(
         }
       }
 
-      if (isDocumentTimeline && node.nodeKind === 'location') {
+      if (isDocumentTimelineMode() && node.nodeKind === 'location') {
         const locationDocumentIndices = visibleLinks
           .filter((link) => link.linkKind === 'documentLocation' && link.source === node.id)
           .map((link) => {
@@ -1936,7 +2006,7 @@ function getTimelineDashboardHtml(
         }
       }
 
-      if (isDocumentTimeline && node.nodeKind === 'event') {
+      if (isDocumentTimelineMode() && node.nodeKind === 'event') {
         const mentionDocumentIndices = (Array.isArray(node.mentions) ? node.mentions : [])
           .map((mention) => documentBackboneIndexByName.get(mention))
           .filter((index) => Number.isFinite(index));
@@ -1955,7 +2025,7 @@ function getTimelineDashboardHtml(
 
       const connected = Number.isFinite(node.connectedEventCount) && node.connectedEventCount > 0;
       const rawMeanIndex = Number.isFinite(node.meanEventIndex) ? node.meanEventIndex : eventCenterIndex;
-      const meanIndex = isDocumentTimeline ? mapEventIndexToBackboneIndex(rawMeanIndex) : rawMeanIndex;
+      const meanIndex = isDocumentTimelineMode() ? mapEventIndexToBackboneIndex(rawMeanIndex) : rawMeanIndex;
       return {
         connected,
         meanIndex,
@@ -2001,7 +2071,6 @@ function getTimelineDashboardHtml(
           const anchor = anchorById.get(node.id) || { x: width / 2, y: backboneY };
           node.targetX = anchor.x;
           node.targetY = anchor.y;
-          node.fy = backboneY;
         } else {
           const metrics = getNodeBackboneMetrics(node);
           if (!metrics.connected) {
@@ -2027,6 +2096,18 @@ function getTimelineDashboardHtml(
         }
         if (!Number.isFinite(node.y)) {
           node.y = node.targetY;
+        }
+      }
+
+      syncBackbonePinning();
+    }
+
+    function syncBackbonePinning() {
+      for (const node of graph.nodes) {
+        if (isBackboneNode(node)) {
+          node.fy = backboneY;
+        } else {
+          node.fy = null;
         }
       }
     }
@@ -2130,6 +2211,8 @@ function getTimelineDashboardHtml(
       }
     }
 
+    recomputeModeState();
+    updateModeButtons();
     setSize();
     updateTargets();
     renderLegend();
@@ -2165,16 +2248,20 @@ function getTimelineDashboardHtml(
     const highlightedBackboneOpacity = 1;
     const highlightedBackboneWidth = 2.4;
 
-    const backboneEdge = backboneEdgeLayer
-      .selectAll('line')
-      .data(backboneLinks, (d) => d.id)
-      .join('line')
-      .attr('stroke', dashboardColors.timeline.backbone)
-      .attr('stroke-opacity', defaultBackboneOpacity)
-      .attr('stroke-width', defaultBackboneWidth)
-      .attr('stroke-linecap', 'round')
-      .attr('marker-end', 'url(#' + backboneMarkerId + ')')
-      .attr('pointer-events', 'none');
+    let backboneEdge = backboneEdgeLayer.selectAll('line');
+    function refreshBackboneEdges() {
+      backboneEdge = backboneEdgeLayer
+        .selectAll('line')
+        .data(backboneLinks, (d) => d.id)
+        .join('line')
+        .attr('stroke', dashboardColors.timeline.backbone)
+        .attr('stroke-opacity', defaultBackboneOpacity)
+        .attr('stroke-width', defaultBackboneWidth)
+        .attr('stroke-linecap', 'round')
+        .attr('marker-end', 'url(#' + backboneMarkerId + ')')
+        .attr('pointer-events', 'none');
+    }
+    refreshBackboneEdges();
 
     const zoom = d3.zoom()
       .scaleExtent([0.2, 3.5])
@@ -2260,7 +2347,7 @@ function getTimelineDashboardHtml(
 
     const link = linkLayer
       .selectAll('path')
-      .data(visibleLinks, (d) => d.id)
+      .data(graph.links, (d) => d.id)
       .join('path')
       .attr('stroke', (d) => (d.linkKind === 'mention' ? dashboardColors.timeline.mentionLink : dashboardColors.timeline.partyLink))
       .attr('stroke-opacity', defaultTimelineLinkOpacity)
@@ -2289,6 +2376,12 @@ function getTimelineDashboardHtml(
         positionTooltip(event);
       })
       .on('mouseout', hideTooltip);
+
+    function refreshVisibleLinkStyles() {
+      const visibleLinkIds = new Set(visibleLinks.map((item) => item.id));
+      link.attr('display', (d) => (visibleLinkIds.has(d.id) ? null : 'none'));
+    }
+    refreshVisibleLinkStyles();
 
     const node = nodeLayer
       .selectAll('circle')
@@ -2412,18 +2505,17 @@ function getTimelineDashboardHtml(
       .distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)))
       .strength(0.08);
 
+    const xForce = d3.forceX((d) => d.targetX)
+      .strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24));
+    const yForce = d3.forceY((d) => d.targetY)
+      .strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24));
+
     const simulation = d3.forceSimulation(graph.nodes)
       .alphaDecay(0.0023)
       .velocityDecay(0.45)
       .force('link', linkForce)
-      .force(
-        'x',
-        d3.forceX((d) => d.targetX).strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24))
-      )
-      .force(
-        'y',
-        d3.forceY((d) => d.targetY).strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24))
-      )
+      .force('x', xForce)
+      .force('y', yForce)
       .force(
         'characterRepel',
         d3.forceManyBody().strength((d) => (d.nodeKind === 'character' || d.nodeKind === 'location' ? -20 : 0)).distanceMax(260)
@@ -2462,9 +2554,38 @@ function getTimelineDashboardHtml(
         });
       });
 
+    function switchTimelineMode(nextMode, animate = true) {
+      if (!isTimelineMode(nextMode) || nextMode === currentTimelineMode) {
+        return;
+      }
+      currentTimelineMode = nextMode;
+      // Clear prior fixed positions before recomputing the new backbone mode.
+      for (const node of graph.nodes) {
+        node.fx = null;
+        node.fy = null;
+      }
+      recomputeModeState();
+      updateModeButtons();
+      updateTargets();
+      syncBackbonePinning();
+      xForce.x((d) => d.targetX).strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24));
+      yForce.y((d) => d.targetY).strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24));
+      refreshBackboneEdges();
+      refreshVisibleLinkStyles();
+      linkForce.links(visibleLinks);
+      simulation.alpha(animate ? 0.9 : 0.5).restart();
+      hideTooltip();
+      resetTimelineConnectionHighlight();
+      if (vscodeApi) {
+        vscodeApi.postMessage({ type: 'timelineModeChanged', mode: currentTimelineMode });
+      }
+    }
+
     window.addEventListener('resize', () => {
       setSize();
       updateTargets();
+      xForce.x((d) => d.targetX);
+      yForce.y((d) => d.targetY);
       linkForce.distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)));
       simulation.alpha(0.7).restart();
       hideTooltip();
@@ -3818,6 +3939,7 @@ class BurbageSidebarProvider implements vscode.WebviewViewProvider {
 type SendPromptMessage = { type: "sendPrompt"; text: string };
 type SyncMessage = { type: "sync" };
 type SaveDashboardMessage = { type: "saveDashboard" };
+type TimelineModeMessage = { type: "setTimelineMode" | "timelineModeChanged"; mode: TimelineDashboardMode };
 
 function isSendPromptMessage(value: unknown): value is SendPromptMessage {
   if (typeof value !== "object" || value === null) {
@@ -3839,6 +3961,14 @@ function isSaveDashboardMessage(value: unknown): value is SaveDashboardMessage {
     return false;
   }
   return (value as { type?: unknown }).type === "saveDashboard";
+}
+
+function isTimelineModeChangedMessage(value: unknown): value is TimelineModeMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const maybe = value as { type?: unknown; mode?: unknown };
+  return maybe.type === "timelineModeChanged" && (maybe.mode === "event" || maybe.mode === "document");
 }
 
 function getWorkspaceRootOrThrow(): string {
