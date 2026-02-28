@@ -90,6 +90,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("burbage.openVonnegutDashboard", async () => {
       await openVonnegutDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openPacingDashboard", async () => {
+      await openPacingDashboard(context);
     })
   );
 }
@@ -277,6 +280,29 @@ type VonnegutDashboardState = {
   refreshTimer?: NodeJS.Timeout;
 };
 
+type PacingDocumentPoint = {
+  id: string;
+  name: string;
+  orderIndex: number;
+  documentIndex?: number;
+  eventCount: number;
+  summary: string;
+};
+
+type PacingGraphData = {
+  documents: PacingDocumentPoint[];
+  smoothingWindow: number;
+  sourceLabel: string;
+};
+
+type PacingDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  graph: PacingGraphData;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
 type DashboardHtmlOptions = {
   includeSaveButton?: boolean;
   standaloneDarkMode?: boolean;
@@ -286,6 +312,7 @@ let relationshipDashboardState: RelationshipDashboardState | undefined;
 let causalDashboardState: CausalDashboardState | undefined;
 let timelineDashboardState: TimelineDashboardState | undefined;
 let vonnegutDashboardState: VonnegutDashboardState | undefined;
+let pacingDashboardState: PacingDashboardState | undefined;
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -1154,6 +1181,117 @@ function disposeVonnegutDashboardState(state: VonnegutDashboardState): void {
   state.watchers = [];
 }
 
+async function openPacingDashboard(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the pacing dashboard.");
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+
+    if (pacingDashboardState && pacingDashboardState.workspaceRoot === workspaceRoot) {
+      pacingDashboardState.panel.reveal(vscode.ViewColumn.One, true);
+      await refreshPacingDashboard(pacingDashboardState, true);
+      return;
+    }
+
+    if (pacingDashboardState) {
+      disposePacingDashboardState(pacingDashboardState);
+      pacingDashboardState = undefined;
+    }
+
+    const graph = await loadPacingGraph(workspaceRoot);
+    const panel = vscode.window.createWebviewPanel(
+      "burbage.pacingDashboard",
+      "Burbage: Pacing Dashboard",
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+
+    const state: PacingDashboardState = {
+      panel,
+      workspaceRoot,
+      graph,
+      watchers: []
+    };
+    pacingDashboardState = state;
+
+    panel.webview.html = getPacingDashboardHtml(graph);
+
+    const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (!isSaveDashboardMessage(message)) {
+        return;
+      }
+      await savePacingDashboardSnapshot(state);
+    });
+    context.subscriptions.push(messageDisposable);
+
+    for (const relativePath of ["Entities/events.yaml", "Entities/documents.yaml", "Manuscript/**"]) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => schedulePacingDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (pacingDashboardState === state) {
+        pacingDashboardState = undefined;
+      }
+      disposePacingDashboardState(state);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not open pacing dashboard: ${message}`);
+  }
+}
+
+function schedulePacingDashboardRefresh(state: PacingDashboardState): void {
+  if (pacingDashboardState !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshPacingDashboard(state, false);
+  }, 180);
+}
+
+async function refreshPacingDashboard(state: PacingDashboardState, showErrorToUser: boolean): Promise<void> {
+  if (pacingDashboardState !== state) {
+    return;
+  }
+  try {
+    const graph = await loadPacingGraph(state.workspaceRoot);
+    state.graph = graph;
+    state.panel.webview.html = getPacingDashboardHtml(graph);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not refresh pacing dashboard: ${message}`);
+  }
+}
+
+function disposePacingDashboardState(state: PacingDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
+}
+
 async function openCausalDiagramDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -1486,6 +1624,20 @@ async function saveVonnegutDashboardSnapshot(state: VonnegutDashboardState): Pro
   }
 }
 
+async function savePacingDashboardSnapshot(state: PacingDashboardState): Promise<void> {
+  try {
+    const html = getPacingDashboardHtml(state.graph, {
+      includeSaveButton: false,
+      standaloneDarkMode: true
+    });
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, "pacing-dashboard.html", html);
+    vscode.window.showInformationMessage(`Saved pacing dashboard to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not save pacing dashboard: ${message}`);
+  }
+}
+
 async function writeDashboardSnapshotFile(workspaceRoot: string, fileName: string, html: string): Promise<string> {
   const dashboardsDirPath = path.join(workspaceRoot, "dashboards");
   await fs.mkdir(dashboardsDirPath, { recursive: true });
@@ -1516,6 +1668,23 @@ async function loadVonnegutGraph(workspaceRoot: string): Promise<VonnegutGraphDa
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
   return buildVonnegutGraph(
+    parseYaml(eventsRaw),
+    parseYaml(documentsRaw),
+    manuscriptDocuments,
+    sources.sourceLabel
+  );
+}
+
+async function loadPacingGraph(workspaceRoot: string): Promise<PacingGraphData> {
+  const sources = await resolveVonnegutDataSources(workspaceRoot);
+  const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
+  const documentsPath = path.join(sources.entitiesDirPath, "documents.yaml");
+  const [eventsRaw, documentsRaw, manuscriptDocuments] = await Promise.all([
+    fs.readFile(eventsPath, "utf8"),
+    pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
+    listManuscriptDocuments(sources.manuscriptDirPath)
+  ]);
+  return buildPacingGraph(
     parseYaml(eventsRaw),
     parseYaml(documentsRaw),
     manuscriptDocuments,
@@ -2077,6 +2246,143 @@ function buildVonnegutGraph(
   return {
     events: eventPoints,
     documents: documentPoints,
+    smoothingWindow,
+    sourceLabel
+  };
+}
+
+function buildPacingGraph(
+  eventsDocument: unknown,
+  documentsDocument: unknown,
+  manuscriptDocuments: string[],
+  sourceLabel: string
+): PacingGraphData {
+  const eventsRecord = asRecord(eventsDocument);
+  const documentsRecord = asRecord(documentsDocument);
+  const eventEntries = Object.entries(eventsRecord);
+  const smoothingWindow = 3;
+
+  const parseOptionalNumber = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value.trim());
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const documentOrder: string[] = [];
+  const knownDocuments = new Set<string>();
+  for (const manuscriptDocument of manuscriptDocuments) {
+    const normalized = normalizeDocumentReference(manuscriptDocument);
+    if (!normalized || knownDocuments.has(normalized)) {
+      continue;
+    }
+    knownDocuments.add(normalized);
+    documentOrder.push(normalized);
+  }
+
+  const documentsByLower = new Map<string, string>();
+  const documentsByBasenameLower = new Map<string, string[]>();
+  const documentsByStemLower = new Map<string, string[]>();
+  for (const documentName of documentOrder) {
+    documentsByLower.set(documentName.toLowerCase(), documentName);
+    const basenameLower = path.posix.basename(documentName).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    basenameMatches.push(documentName);
+    documentsByBasenameLower.set(basenameLower, basenameMatches);
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    stemMatches.push(documentName);
+    documentsByStemLower.set(stemLower, stemMatches);
+  }
+
+  const resolveDocumentName = (documentReference: string): string | undefined => {
+    const normalizedReference = normalizeDocumentReference(documentReference);
+    if (!normalizedReference) {
+      return undefined;
+    }
+    const exact = documentsByLower.get(normalizedReference.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+    const basenameLower = path.posix.basename(normalizedReference).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    if (basenameMatches.length === 1) {
+      return basenameMatches[0];
+    }
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    if (stemMatches.length === 1) {
+      return stemMatches[0];
+    }
+    return undefined;
+  };
+
+  const documentSummaryByName = new Map<string, string>();
+  const documentIndexByName = new Map<string, number>();
+  for (const [documentRecordName, documentRecordValue] of Object.entries(documentsRecord)) {
+    const resolvedDocumentName = resolveDocumentName(documentRecordName);
+    if (!resolvedDocumentName) {
+      continue;
+    }
+    const documentRecord = asRecord(documentRecordValue);
+    documentSummaryByName.set(resolvedDocumentName, asOptionalString(documentRecord["summary"]) ?? "");
+    const parsedIndex = parseOptionalNumber(documentRecord["index"]);
+    if (typeof parsedIndex === "number") {
+      documentIndexByName.set(resolvedDocumentName, parsedIndex);
+    }
+  }
+
+  const documentEventCountByName = new Map<string, number>();
+  for (const [, eventValue] of eventEntries) {
+    const event = asRecord(eventValue);
+    const mentions = toUniqueStrings(
+      asStringArray(event["mentions"])
+        .map((mention) => resolveDocumentName(mention))
+        .filter((mention): mention is string => typeof mention === "string")
+    );
+    for (const mention of mentions) {
+      if (!knownDocuments.has(mention)) {
+        continue;
+      }
+      documentEventCountByName.set(mention, (documentEventCountByName.get(mention) ?? 0) + 1);
+    }
+  }
+
+  const sortedDocumentNames = documentOrder.slice().sort((a, b) => {
+    const indexA = documentIndexByName.get(a);
+    const indexB = documentIndexByName.get(b);
+    const hasA = Number.isFinite(indexA);
+    const hasB = Number.isFinite(indexB);
+    if (hasA && hasB && indexA !== indexB) {
+      return (indexA as number) - (indexB as number);
+    }
+    if (hasA && !hasB) {
+      return -1;
+    }
+    if (!hasA && hasB) {
+      return 1;
+    }
+    return a.localeCompare(b);
+  });
+
+  const documents: PacingDocumentPoint[] = sortedDocumentNames.map((documentName, orderIndex) => ({
+    id: `document:${documentName}`,
+    name: documentName,
+    orderIndex,
+    documentIndex: documentIndexByName.get(documentName),
+    eventCount: documentEventCountByName.get(documentName) ?? 0,
+    summary: documentSummaryByName.get(documentName) ?? ""
+  }));
+
+  return {
+    documents,
     smoothingWindow,
     sourceLabel
   };
@@ -3461,6 +3767,330 @@ function getVonnegutDashboardHtml(
     });
 
     updateModeButtons();
+    render();
+  </script>
+</body>
+</html>`;
+}
+
+function getPacingDashboardHtml(
+  graph: PacingGraphData,
+  options: DashboardHtmlOptions = {}
+): string {
+  const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
+  const includeSaveButton = options.includeSaveButton ?? true;
+  const standaloneDarkMode = options.standaloneDarkMode ?? false;
+  const rootCssVars = standaloneDarkMode
+    ? `color-scheme: dark;
+      --dashboard-bg: #0f1318;
+      --dashboard-fg: #e7edf3;
+      --dashboard-border: #2a3340;
+      --dashboard-widget-bg: #181f28;
+      --dashboard-description: #9aa7b8;
+      --dashboard-tooltip-bg: rgba(21, 28, 36, 0.95);
+      --dashboard-tooltip-fg: #f3f6fb;
+      --dashboard-font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;`
+    : `color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-tooltip-bg: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
+  const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      ${rootCssVars}
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
+      overflow: hidden;
+    }
+    .root {
+      width: 100%;
+      height: 100%;
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+    }
+    .tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 460px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-tooltip-bg);
+      color: var(--dashboard-tooltip-fg);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      display: none;
+      font-size: 12px;
+    }
+    .legend {
+      position: fixed;
+      left: 14px;
+      bottom: 14px;
+      z-index: 100;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      max-width: min(42vw, 480px);
+    }
+    .legend-title {
+      margin: 0 0 6px 0;
+      color: var(--dashboard-description);
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    .swatch {
+      width: 12px;
+      height: 2px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .save-button {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 120;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  ${saveButtonHtml}
+  <div class="root">
+    <svg id="graph"></svg>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <div id="legend" class="legend"></div>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script>
+    const graph = ${graphJson};
+    const dashboardColors = ${dashboardColorsJson};
+    const nodeColor = dashboardColors.timeline.documentNode;
+    const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
+    const svg = d3.select('#graph');
+    const tooltip = document.getElementById('tooltip');
+    const legend = document.getElementById('legend');
+    const saveButton = document.getElementById('save-dashboard');
+    const margin = { top: 34, right: 44, bottom: 132, left: 58 };
+    let width = 0;
+    let height = 0;
+
+    function setSize() {
+      const rect = document.body.getBoundingClientRect();
+      width = Math.max(440, rect.width);
+      height = Math.max(340, rect.height);
+      svg.attr('viewBox', [0, 0, width, height]);
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+      tooltip.textContent = '';
+    }
+
+    function positionTooltip(event) {
+      const offset = 14;
+      const maxX = window.innerWidth - tooltip.offsetWidth - 8;
+      const maxY = window.innerHeight - tooltip.offsetHeight - 8;
+      const x = Math.min(maxX, event.clientX + offset);
+      const y = Math.min(maxY, event.clientY + offset);
+      tooltip.style.left = Math.max(8, x) + 'px';
+      tooltip.style.top = Math.max(8, y) + 'px';
+    }
+
+    function showTooltip(event, rows) {
+      tooltip.textContent = rows.filter(Boolean).join('\\n');
+      tooltip.style.display = 'block';
+      positionTooltip(event);
+    }
+
+    function buildMovingAverageSeries(points, windowSize) {
+      const series = [];
+      if (!Array.isArray(points) || points.length === 0 || windowSize <= 0) {
+        return series;
+      }
+      for (let index = 0; index <= points.length - windowSize; index += 1) {
+        const windowPoints = points.slice(index, index + windowSize);
+        const total = windowPoints.reduce((sum, point) => sum + (Number.isFinite(point.eventCount) ? point.eventCount : 0), 0);
+        series.push({
+          xIndex: index + (windowSize - 1) / 2,
+          eventCount: total / windowPoints.length
+        });
+      }
+      return series;
+    }
+
+    function renderLegend() {
+      legend.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'legend-title';
+      title.textContent = 'Series';
+      legend.appendChild(title);
+
+      const rows = [
+        { label: 'Events per document', color: nodeColor },
+        { label: graph.smoothingWindow + '-point moving average', color: nodeColor }
+      ];
+      for (const rowData of rows) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = rowData.color;
+        const label = document.createElement('span');
+        label.textContent = rowData.label;
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legend.appendChild(row);
+      }
+    }
+
+    function render() {
+      setSize();
+      hideTooltip();
+      svg.selectAll('*').remove();
+      renderLegend();
+
+      const points = graph.documents;
+      const plotLeft = margin.left;
+      const plotRight = width - margin.right;
+      const plotTop = margin.top;
+      const plotBottom = height - margin.bottom;
+      const domainMax = Math.max(1, points.length - 1);
+      const maxCount = points.reduce((maxValue, point) => Math.max(maxValue, point.eventCount || 0), 0);
+      const yMax = Math.max(1, maxCount);
+
+      const x = d3.scaleLinear().domain([0, domainMax]).range([plotLeft, plotRight]);
+      const y = d3.scaleLinear().domain([0, yMax]).nice().range([plotBottom, plotTop]);
+
+      const layer = svg.append('g');
+      const xAxis = d3.axisBottom(x)
+        .ticks(Math.max(2, Math.min(8, points.length)))
+        .tickFormat((value) => String(Math.round(Number(value) + 1)));
+      const yAxis = d3.axisLeft(y).ticks(Math.max(3, Math.min(10, yMax + 1)));
+
+      layer.append('g')
+        .attr('transform', 'translate(0,' + plotBottom + ')')
+        .attr('color', 'var(--dashboard-description)')
+        .call(xAxis);
+
+      layer.append('g')
+        .attr('transform', 'translate(' + plotLeft + ',0)')
+        .attr('color', 'var(--dashboard-description)')
+        .call(yAxis);
+
+      layer.append('text')
+        .attr('x', plotLeft)
+        .attr('y', 16)
+        .attr('fill', 'var(--dashboard-description)')
+        .attr('font-size', 11)
+        .text('Document Sequence');
+
+      layer.append('text')
+        .attr('x', 12)
+        .attr('y', plotTop - 8)
+        .attr('fill', 'var(--dashboard-description)')
+        .attr('font-size', 11)
+        .text('Event Count');
+
+      const movingAverage = buildMovingAverageSeries(points, graph.smoothingWindow);
+      const line = d3.line()
+        .x((point) => x(point.xIndex))
+        .y((point) => y(point.eventCount))
+        .curve(d3.curveMonotoneX);
+
+      layer.append('path')
+        .datum(movingAverage)
+        .attr('d', line)
+        .attr('fill', 'none')
+        .attr('stroke', nodeColor)
+        .attr('stroke-width', 2.8)
+        .attr('stroke-opacity', 0.92);
+
+      const pointGroup = layer.append('g');
+      pointGroup.selectAll('circle')
+        .data(points, (d) => d.id)
+        .join('circle')
+        .attr('cx', (d) => x(d.orderIndex))
+        .attr('cy', (d) => y(d.eventCount))
+        .attr('r', 6.8)
+        .attr('fill', nodeColor)
+        .attr('stroke', nodeColor)
+        .attr('stroke-width', 1.5)
+        .on('mouseover', (event, d) => {
+          showTooltip(event, [
+            d.name,
+            'Events in document: ' + d.eventCount,
+            d.summary ? 'Summary: ' + d.summary : 'Summary: (none)'
+          ]);
+        })
+        .on('mousemove', (event) => {
+          if (tooltip.style.display !== 'block') return;
+          positionTooltip(event);
+        })
+        .on('mouseout', hideTooltip);
+
+      layer.append('g')
+        .selectAll('text')
+        .data(points, (d) => d.id)
+        .join('text')
+        .attr('font-size', 11)
+        .attr('fill', 'var(--dashboard-fg)')
+        .attr('dominant-baseline', 'hanging')
+        .attr('pointer-events', 'none')
+        .attr('transform', (d) => {
+          const labelY = y(d.eventCount) + 8;
+          return 'translate(' + (x(d.orderIndex) + 7) + ',' + labelY + ') rotate(45)';
+        })
+        .text((d) => d.name);
+    }
+
+    if (saveButton && vscodeApi) {
+      saveButton.addEventListener('click', () => {
+        vscodeApi.postMessage({ type: 'saveDashboard' });
+      });
+    }
+    if (saveButton && !vscodeApi) {
+      saveButton.style.display = 'none';
+    }
+
+    window.addEventListener('resize', () => {
+      render();
+    });
+
     render();
   </script>
 </body>

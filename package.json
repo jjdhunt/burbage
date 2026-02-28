@@ -2,7 +2,7 @@
   "name": "burbage",
   "displayName": "Burbage",
   "description": "Entity synchronization assistant for structured text projects.",
-  "version": "0.0.93",
+  "version": "0.0.94",
   "publisher": "jack-local",
   "license": "MIT",
   "engines": {
@@ -22,6 +22,7 @@
     "onCommand:burbage.openGeographyDashboard",
     "onCommand:burbage.openCausalDiagramDashboard",
     "onCommand:burbage.openVonnegutDashboard",
+    "onCommand:burbage.openPacingDashboard",
     "onView:burbage.sidebar"
   ],
   "main": "./dist/extension.js",
@@ -84,6 +85,10 @@
       {
         "command": "burbage.openVonnegutDashboard",
         "title": "Burbage: Open Vonnegut Diagram"
+      },
+      {
+        "command": "burbage.openPacingDashboard",
+        "title": "Burbage: Open Pacing Dashboard"
       }
     ]
   },

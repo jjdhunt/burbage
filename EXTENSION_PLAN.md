@@ -27,6 +27,7 @@ Current command surface (`package.json`):
 - `burbage.openGeographyDashboard`
 - `burbage.openCausalDiagramDashboard`
 - `burbage.openVonnegutDashboard`
+- `burbage.openPacingDashboard`
 
 Runtime dependency:
 - `yaml`
@@ -96,6 +97,11 @@ Also:
   - document valence computed as mean of valenced events mentioning each document
   - smooth moving average curve (window = 3)
 
+- Pacing Dashboard:
+  - document-sequence scatterplot
+  - y-value is number of events mentioning each document
+  - smooth moving average curve (window = 3)
+
 All dashboards support snapshot export and watcher-driven refresh.
 
 ### 4. Codex Integration
@@ -111,19 +117,13 @@ All dashboards support snapshot export and watcher-driven refresh.
 
 ### Priority Dashboard TODOs
 
-1. Pacing Dashboard
-- Timeline of number/density of events per chapter/document.
-- Inputs:
-  - `documents.yaml.index`
-  - `events.yaml.mentions`
-
-2. Tables: Plot Grid
+1. Tables: Plot Grid
 - Matrix view:
   - rows: characters
   - columns: events
   - cell: character role in event
 
-3. Tables: Chapter Summary Timeline
+2. Tables: Chapter Summary Timeline
 - Row-based chapter/document summary table.
 - Each row is one chapter/document summary.
 

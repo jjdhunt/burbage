@@ -21,6 +21,7 @@ Current MVP commands:
 - `Burbage: Open Geography Dashboard` (`burbage.openGeographyDashboard`)
 - `Burbage: Open Causal Diagram Dashboard` (`burbage.openCausalDiagramDashboard`)
 - `Burbage: Open Vonnegut Diagram` (`burbage.openVonnegutDashboard`)
+- `Burbage: Open Pacing Dashboard` (`burbage.openPacingDashboard`)
 
 ## What `Burbage: Setup Project` does
 
