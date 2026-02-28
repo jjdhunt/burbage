@@ -79,6 +79,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("burbage.openTimelineDashboard", async () => {
       await openTimelineDashboard(context);
     }),
+    vscode.commands.registerCommand("burbage.openDocumentTimelineDashboard", async () => {
+      await openDocumentTimelineDashboard(context);
+    }),
     vscode.commands.registerCommand("burbage.openLocationsHierarchyDashboard", async () => {
       await openLocationsHierarchyDashboard(context);
     }),
@@ -208,11 +211,13 @@ type CausalGraphData = {
 };
 
 type LocationDashboardMode = "hierarchy" | "geography";
+type TimelineDashboardMode = "event" | "document";
 
 type TimelineDashboardState = {
   panel: vscode.WebviewPanel;
   workspaceRoot: string;
   graph: TimelineGraphData;
+  mode: TimelineDashboardMode;
   watchers: vscode.FileSystemWatcher[];
   refreshTimer?: NodeJS.Timeout;
 };
@@ -240,8 +245,11 @@ type DashboardHtmlOptions = {
 };
 
 let relationshipDashboardState: RelationshipDashboardState | undefined;
-let timelineDashboardState: TimelineDashboardState | undefined;
 let causalDashboardState: CausalDashboardState | undefined;
+const timelineDashboardStates: Record<TimelineDashboardMode, TimelineDashboardState | undefined> = {
+  event: undefined,
+  document: undefined
+};
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -820,15 +828,50 @@ function getRelationshipDashboardHtml(graph: RelationshipGraphData, options: Das
 </html>`;
 }
 
+function getTimelineDashboardMeta(mode: TimelineDashboardMode): {
+  modeTitle: string;
+  panelViewType: string;
+  panelTitle: string;
+  saveFileName: string;
+} {
+  if (mode === "document") {
+    return {
+      modeTitle: "Document Timeline",
+      panelViewType: "burbage.documentTimelineDashboard",
+      panelTitle: "Burbage: Document Timeline",
+      saveFileName: "document-timeline-dashboard.html"
+    };
+  }
+  return {
+    modeTitle: "Event Timeline",
+    panelViewType: "burbage.eventTimelineDashboard",
+    panelTitle: "Burbage: Event Timeline",
+    saveFileName: "event-timeline-dashboard.html"
+  };
+}
+
 async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<void> {
+  await openTimelineDashboardByMode(context, "event");
+}
+
+async function openDocumentTimelineDashboard(context: vscode.ExtensionContext): Promise<void> {
+  await openTimelineDashboardByMode(context, "document");
+}
+
+async function openTimelineDashboardByMode(
+  context: vscode.ExtensionContext,
+  mode: TimelineDashboardMode
+): Promise<void> {
   try {
+    const dashboardMeta = getTimelineDashboardMeta(mode);
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
-      vscode.window.showErrorMessage("Open a folder/workspace before opening the timeline dashboard.");
+      vscode.window.showErrorMessage(`Open a folder/workspace before opening the ${dashboardMeta.modeTitle.toLowerCase()}.`);
       return;
     }
     const workspaceRoot = workspaceFolder.uri.fsPath;
 
+    const timelineDashboardState = timelineDashboardStates[mode];
     if (timelineDashboardState && timelineDashboardState.workspaceRoot === workspaceRoot) {
       timelineDashboardState.panel.reveal(vscode.ViewColumn.One, true);
       await refreshTimelineDashboard(timelineDashboardState, true);
@@ -837,14 +880,14 @@ async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<
 
     if (timelineDashboardState) {
       disposeTimelineDashboardState(timelineDashboardState);
-      timelineDashboardState = undefined;
+      timelineDashboardStates[mode] = undefined;
     }
 
     const graph = await loadTimelineGraph(workspaceRoot);
 
     const panel = vscode.window.createWebviewPanel(
-      "burbage.timelineDashboard",
-      "Burbage: Timeline Dashboard",
+      dashboardMeta.panelViewType,
+      dashboardMeta.panelTitle,
       vscode.ViewColumn.One,
       {
         enableScripts: true,
@@ -856,11 +899,12 @@ async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<
       panel,
       workspaceRoot,
       graph,
+      mode,
       watchers: []
     };
-    timelineDashboardState = state;
+    timelineDashboardStates[mode] = state;
 
-    panel.webview.html = getTimelineDashboardHtml(graph);
+    panel.webview.html = getTimelineDashboardHtml(graph, mode);
 
     const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isSaveDashboardMessage(message)) {
@@ -887,19 +931,20 @@ async function openTimelineDashboard(context: vscode.ExtensionContext): Promise<
     }
 
     panel.onDidDispose(() => {
-      if (timelineDashboardState === state) {
-        timelineDashboardState = undefined;
+      if (timelineDashboardStates[mode] === state) {
+        timelineDashboardStates[mode] = undefined;
       }
       disposeTimelineDashboardState(state);
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(`Could not open timeline dashboard: ${message}`);
+    const dashboardMeta = getTimelineDashboardMeta(mode);
+    vscode.window.showErrorMessage(`Could not open ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
   }
 }
 
 function scheduleTimelineDashboardRefresh(state: TimelineDashboardState): void {
-  if (timelineDashboardState !== state) {
+  if (timelineDashboardStates[state.mode] !== state) {
     return;
   }
   if (state.refreshTimer) {
@@ -911,19 +956,20 @@ function scheduleTimelineDashboardRefresh(state: TimelineDashboardState): void {
 }
 
 async function refreshTimelineDashboard(state: TimelineDashboardState, showErrorToUser: boolean): Promise<void> {
-  if (timelineDashboardState !== state) {
+  if (timelineDashboardStates[state.mode] !== state) {
     return;
   }
   try {
     const graph = await loadTimelineGraph(state.workspaceRoot);
     state.graph = graph;
-    state.panel.webview.html = getTimelineDashboardHtml(graph);
+    state.panel.webview.html = getTimelineDashboardHtml(graph, state.mode);
   } catch (error) {
     if (!showErrorToUser) {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(`Could not refresh timeline dashboard: ${message}`);
+    const dashboardMeta = getTimelineDashboardMeta(state.mode);
+    vscode.window.showErrorMessage(`Could not refresh ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
   }
 }
 
@@ -1210,15 +1256,17 @@ async function saveRelationshipDashboardSnapshot(state: RelationshipDashboardSta
 
 async function saveTimelineDashboardSnapshot(state: TimelineDashboardState): Promise<void> {
   try {
-    const html = getTimelineDashboardHtml(state.graph, {
+    const dashboardMeta = getTimelineDashboardMeta(state.mode);
+    const html = getTimelineDashboardHtml(state.graph, state.mode, {
       includeSaveButton: false,
       standaloneDarkMode: true
     });
-    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, "timeline-dashboard.html", html);
-    vscode.window.showInformationMessage(`Saved timeline dashboard to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, dashboardMeta.saveFileName, html);
+    vscode.window.showInformationMessage(`Saved ${dashboardMeta.modeTitle.toLowerCase()} to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(`Could not save timeline dashboard: ${message}`);
+    const dashboardMeta = getTimelineDashboardMeta(state.mode);
+    vscode.window.showErrorMessage(`Could not save ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
   }
 }
 
@@ -1580,8 +1628,13 @@ function buildTimelineGraph(
   };
 }
 
-function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHtmlOptions = {}): string {
+function getTimelineDashboardHtml(
+  graph: TimelineGraphData,
+  mode: TimelineDashboardMode,
+  options: DashboardHtmlOptions = {}
+): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const timelineModeJson = JSON.stringify(mode).replace(/</g, "\\u003c");
   const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
   const includeSaveButton = options.includeSaveButton ?? true;
   const standaloneDarkMode = options.standaloneDarkMode ?? false;
@@ -1708,6 +1761,8 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const timelineMode = ${timelineModeJson};
+    const isDocumentTimeline = timelineMode === 'document';
     const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
@@ -1728,21 +1783,68 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
     let dragging = false;
     let backboneY = 0;
     let backboneStartX = 0;
-    const fixedBackboneDx = 50;
+    const backboneDx = 50;
     const eventAnchorStrength = 5.0;
     const anchorById = new Map();
 
     const eventNodes = graph.nodes
       .filter((node) => node.nodeKind === 'event')
       .sort((a, b) => (a.eventIndex || 0) - (b.eventIndex || 0));
-    const eventBackboneLinks = eventNodes.slice(0, -1).map((sourceNode, index) => ({
+    const eventCount = eventNodes.length;
+    const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
+    const backboneNodes = isDocumentTimeline ? documentNodes : eventNodes;
+    const backboneNodeKind = isDocumentTimeline ? 'document' : 'event';
+    const backboneCount = backboneNodes.length;
+    const backboneLinks = backboneNodes.slice(0, -1).map((sourceNode, index) => ({
       id: 'backbone:' + index,
       source: sourceNode,
-      target: eventNodes[index + 1]
+      target: backboneNodes[index + 1]
     }));
+    const documentBackboneIndexByName = new Map(backboneNodes.map((node, index) => [node.name, index]));
+    const eventCenterIndex = eventCount <= 1 ? 0 : (eventCount - 1) / 2;
+    const backboneCenterIndex = backboneCount <= 1 ? 0 : (backboneCount - 1) / 2;
+
+    function isBackboneNode(node) {
+      return node.nodeKind === backboneNodeKind;
+    }
+
+    function mapEventIndexToBackboneIndex(eventIndex) {
+      if (!Number.isFinite(eventIndex) || eventCount <= 1 || backboneCount <= 1) {
+        return backboneCenterIndex;
+      }
+      return clamp((eventIndex / (eventCount - 1)) * (backboneCount - 1), 0, backboneCount - 1);
+    }
+
+    function getNodeBackboneMetrics(node) {
+      if (isDocumentTimeline && node.nodeKind === 'event') {
+        const mentionDocumentIndices = (Array.isArray(node.mentions) ? node.mentions : [])
+          .map((mention) => documentBackboneIndexByName.get(mention))
+          .filter((index) => Number.isFinite(index));
+        if (mentionDocumentIndices.length > 0) {
+          const sortedMentionIndices = mentionDocumentIndices.slice().sort((a, b) => a - b);
+          const first = sortedMentionIndices[0];
+          const last = sortedMentionIndices[sortedMentionIndices.length - 1];
+          const meanIndex = sortedMentionIndices.reduce((sum, index) => sum + index, 0) / sortedMentionIndices.length;
+          return {
+            connected: true,
+            meanIndex,
+            span: Math.max(0, last - first)
+          };
+        }
+      }
+
+      const connected = Number.isFinite(node.connectedEventCount) && node.connectedEventCount > 0;
+      const rawMeanIndex = Number.isFinite(node.meanEventIndex) ? node.meanEventIndex : eventCenterIndex;
+      const meanIndex = isDocumentTimeline ? mapEventIndexToBackboneIndex(rawMeanIndex) : rawMeanIndex;
+      return {
+        connected,
+        meanIndex,
+        span: Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0
+      };
+    }
+
     const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
     const characterLikeNodes = graph.nodes.filter((node) => node.nodeKind === 'character' || node.nodeKind === 'location');
-    const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
     const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 
     const types = Array.from(new Set(characterNodes.map((node) => node.characterType || 'Unknown'))).sort();
@@ -1769,43 +1871,38 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
 
     function updateTargets() {
       backboneY = height / 2;
-      const eventCount = eventNodes.length;
-      backboneStartX = eventCount <= 1 ? width / 2 : width / 2 - ((eventCount - 1) * fixedBackboneDx) / 2;
+      backboneStartX = backboneCount <= 1 ? width / 2 : width / 2 - ((backboneCount - 1) * backboneDx) / 2;
 
       anchorById.clear();
-      for (const eventNode of eventNodes) {
-        const index = Number.isFinite(eventNode.eventIndex) ? eventNode.eventIndex : 0;
-        const x = eventCount <= 1 ? width / 2 : backboneStartX + index * fixedBackboneDx;
-        anchorById.set(eventNode.id, { x, y: backboneY });
+      for (let index = 0; index < backboneNodes.length; index += 1) {
+        const backboneNode = backboneNodes[index];
+        const x = backboneCount <= 1 ? width / 2 : backboneStartX + index * backboneDx;
+        anchorById.set(backboneNode.id, { x, y: backboneY });
       }
 
-      const centerIndex = eventCount <= 1 ? 0 : (eventCount - 1) / 2;
       for (const node of graph.nodes) {
-        if (node.nodeKind === 'event') {
+        if (isBackboneNode(node)) {
           const anchor = anchorById.get(node.id) || { x: width / 2, y: backboneY };
           node.targetX = anchor.x;
           node.targetY = anchor.y;
           node.fy = backboneY;
         } else {
-          const isDisconnected = !Number.isFinite(node.connectedEventCount) || node.connectedEventCount <= 0;
-          if (isDisconnected) {
-            const firstBackboneNode = eventNodes.length > 0 ? eventNodes[0] : undefined;
+          const metrics = getNodeBackboneMetrics(node);
+          if (!metrics.connected) {
+            const firstBackboneNode = backboneNodes.length > 0 ? backboneNodes[0] : undefined;
             const firstAnchor = firstBackboneNode ? anchorById.get(firstBackboneNode.id) : undefined;
-            node.targetX = (firstAnchor ? firstAnchor.x : width / 2) - 2 * fixedBackboneDx;
+            node.targetX = (firstAnchor ? firstAnchor.x : width / 2) - 2 * backboneDx;
             if (isCharacterLikeNode(node)) {
-              const yOffset = 2 * fixedBackboneDx * aspect;
+              const yOffset = 2 * backboneDx * aspect;
               node.targetY = backboneY - yOffset;
             } else {
-              const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
-              const spanOffset = (span + 1) * fixedBackboneDx * aspect;
-              node.targetY = backboneY + 2 * fixedBackboneDx + spanOffset;
+              const spanOffset = (metrics.span + 1) * backboneDx * aspect;
+              node.targetY = backboneY + 2 * backboneDx + spanOffset;
             }
           } else {
-            const meanIndex = Number.isFinite(node.meanEventIndex) ? node.meanEventIndex : centerIndex;
-            node.targetX = eventCount <= 1 ? width / 2 : backboneStartX + meanIndex * fixedBackboneDx;
-            const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
-            const yOffset = (span + 1) * fixedBackboneDx * aspect;
-            node.targetY = isCharacterLikeNode(node) ? backboneY - yOffset : backboneY + 4 * fixedBackboneDx + yOffset;
+            node.targetX = backboneCount <= 1 ? width / 2 : backboneStartX + metrics.meanIndex * backboneDx;
+            const yOffset = (metrics.span + 1) * backboneDx * aspect;
+            node.targetY = isCharacterLikeNode(node) ? backboneY - 1 * backboneDx - yOffset : backboneY + 5 * backboneDx + yOffset;
           }
         }
 
@@ -1954,7 +2051,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
 
     const backboneEdge = backboneEdgeLayer
       .selectAll('line')
-      .data(eventBackboneLinks, (d) => d.id)
+      .data(backboneLinks, (d) => d.id)
       .join('line')
       .attr('stroke', dashboardColors.timeline.backbone)
       .attr('stroke-opacity', defaultBackboneOpacity)
@@ -2192,7 +2289,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
 
     const linkForce = d3.forceLink(graph.links)
       .id((d) => d.id)
-      .distance((d) => (d.linkKind === 'mention' ? Math.max(24, fixedBackboneDx * 0.8) : Math.max(28, fixedBackboneDx * 0.9)))
+      .distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)))
       .strength(0.08);
 
     const simulation = d3.forceSimulation(graph.nodes)
@@ -2201,11 +2298,11 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
       .force('link', linkForce)
       .force(
         'x',
-        d3.forceX((d) => d.targetX).strength((d) => (d.nodeKind === 'event' ? eventAnchorStrength : 0.24))
+        d3.forceX((d) => d.targetX).strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24))
       )
       .force(
         'y',
-        d3.forceY((d) => d.targetY).strength((d) => (d.nodeKind === 'event' ? eventAnchorStrength : 0.24))
+        d3.forceY((d) => d.targetY).strength((d) => (isBackboneNode(d) ? eventAnchorStrength : 0.24))
       )
       .force(
         'characterRepel',
@@ -2248,7 +2345,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
     window.addEventListener('resize', () => {
       setSize();
       updateTargets();
-      linkForce.distance((d) => (d.linkKind === 'mention' ? Math.max(24, fixedBackboneDx * 0.8) : Math.max(28, fixedBackboneDx * 0.9)));
+      linkForce.distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)));
       simulation.alpha(0.7).restart();
       hideTooltip();
       resetTimelineConnectionHighlight();
@@ -2261,13 +2358,13 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
         highlightTimelineConnectionsForNode(d.id);
         if (!event.active) simulation.alphaTarget(0.32).restart();
         d.fx = d.x;
-        d.fy = d.nodeKind === 'event' ? backboneY : d.y;
+        d.fy = isBackboneNode(d) ? backboneY : d.y;
       })
       .on('drag', (event, d) => {
         hideTooltip();
         highlightTimelineConnectionsForNode(d.id);
         d.fx = event.x;
-        d.fy = d.nodeKind === 'event' ? backboneY : event.y;
+        d.fy = isBackboneNode(d) ? backboneY : event.y;
       })
       .on('end', (event, d) => {
         dragging = false;
@@ -2275,7 +2372,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
         resetTimelineConnectionHighlight();
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
-        d.fy = d.nodeKind === 'event' ? backboneY : null;
+        d.fy = isBackboneNode(d) ? backboneY : null;
       });
 
     node.call(drag);

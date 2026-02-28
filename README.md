@@ -16,7 +16,8 @@ Current MVP commands:
 - `Burbage: Open Chat` (`burbage.openChat`)
 - `Burbage: Login to Codex` (`burbage.loginCodex`)
 - `Burbage: Open Relationship Dashboard` (`burbage.openRelationshipDashboard`) - placeholder
-- `Burbage: Open Timeline Dashboard` (`burbage.openTimelineDashboard`)
+- `Burbage: Open Event Timeline` (`burbage.openTimelineDashboard`)
+- `Burbage: Open Document Timeline` (`burbage.openDocumentTimelineDashboard`)
 - `Burbage: Open Locations Hierarchy Dashboard` (`burbage.openLocationsHierarchyDashboard`)
 - `Burbage: Open Geography Dashboard` (`burbage.openGeographyDashboard`)
 - `Burbage: Open Causal Diagram Dashboard` (`burbage.openCausalDiagramDashboard`)
