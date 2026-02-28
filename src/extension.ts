@@ -1727,9 +1727,8 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
     let height = 0;
     let dragging = false;
     let backboneY = 0;
-    let backboneDx = 150;
     let backboneStartX = 0;
-    const backboneDxScale = 1.5;
+    const fixedBackboneDx = 50;
     const eventAnchorStrength = 5.0;
     const anchorById = new Map();
 
@@ -1771,19 +1770,12 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
     function updateTargets() {
       backboneY = height / 2;
       const eventCount = eventNodes.length;
-      if (eventCount <= 1) {
-        backboneDx = Math.max(64, Math.min(140, width * 0.35)) * backboneDxScale;
-        backboneStartX = width / 2;
-      } else {
-        const margin = clamp(width * 0.12, 72, 180);
-        backboneStartX = margin;
-        backboneDx = ((width - margin * 2) / (eventCount - 1)) * backboneDxScale;
-      }
+      backboneStartX = eventCount <= 1 ? width / 2 : width / 2 - ((eventCount - 1) * fixedBackboneDx) / 2;
 
       anchorById.clear();
       for (const eventNode of eventNodes) {
         const index = Number.isFinite(eventNode.eventIndex) ? eventNode.eventIndex : 0;
-        const x = eventCount <= 1 ? width / 2 : backboneStartX + index * backboneDx;
+        const x = eventCount <= 1 ? width / 2 : backboneStartX + index * fixedBackboneDx;
         anchorById.set(eventNode.id, { x, y: backboneY });
       }
 
@@ -1799,21 +1791,21 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
           if (isDisconnected) {
             const firstBackboneNode = eventNodes.length > 0 ? eventNodes[0] : undefined;
             const firstAnchor = firstBackboneNode ? anchorById.get(firstBackboneNode.id) : undefined;
-            node.targetX = (firstAnchor ? firstAnchor.x : width / 2) - 2 * backboneDx;
+            node.targetX = (firstAnchor ? firstAnchor.x : width / 2) - 2 * fixedBackboneDx;
             if (isCharacterLikeNode(node)) {
-              const yOffset = 2 * backboneDx * aspect;
+              const yOffset = 2 * fixedBackboneDx * aspect;
               node.targetY = backboneY - yOffset;
             } else {
               const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
-              const spanOffset = (span + 1) * backboneDx * aspect;
-              node.targetY = backboneY + 2 * backboneDx + spanOffset;
+              const spanOffset = (span + 1) * fixedBackboneDx * aspect;
+              node.targetY = backboneY + 2 * fixedBackboneDx + spanOffset;
             }
           } else {
             const meanIndex = Number.isFinite(node.meanEventIndex) ? node.meanEventIndex : centerIndex;
-            node.targetX = eventCount <= 1 ? width / 2 : backboneStartX + meanIndex * backboneDx;
+            node.targetX = eventCount <= 1 ? width / 2 : backboneStartX + meanIndex * fixedBackboneDx;
             const span = Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0;
-            const yOffset = (span + 1) * backboneDx * aspect;
-            node.targetY = isCharacterLikeNode(node) ? backboneY - yOffset : backboneY + 4 * backboneDx + yOffset;
+            const yOffset = (span + 1) * fixedBackboneDx * aspect;
+            node.targetY = isCharacterLikeNode(node) ? backboneY - yOffset : backboneY + 4 * fixedBackboneDx + yOffset;
           }
         }
 
@@ -2200,7 +2192,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
 
     const linkForce = d3.forceLink(graph.links)
       .id((d) => d.id)
-      .distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)))
+      .distance((d) => (d.linkKind === 'mention' ? Math.max(24, fixedBackboneDx * 0.8) : Math.max(28, fixedBackboneDx * 0.9)))
       .strength(0.08);
 
     const simulation = d3.forceSimulation(graph.nodes)
@@ -2256,7 +2248,7 @@ function getTimelineDashboardHtml(graph: TimelineGraphData, options: DashboardHt
     window.addEventListener('resize', () => {
       setSize();
       updateTargets();
-      linkForce.distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)));
+      linkForce.distance((d) => (d.linkKind === 'mention' ? Math.max(24, fixedBackboneDx * 0.8) : Math.max(28, fixedBackboneDx * 0.9)));
       simulation.alpha(0.7).restart();
       hideTooltip();
       resetTimelineConnectionHighlight();
