@@ -143,6 +143,7 @@ type TimelineGraphNode = {
   connectedEventCount: number;
   meanEventIndex: number;
   eventIndex?: number;
+  documentIndex?: number;
   characterType?: string;
   bio?: string;
   date?: string;
@@ -155,7 +156,7 @@ type TimelineGraphLink = {
   id: string;
   source: string;
   target: string;
-  linkKind: "party" | "location" | "mention";
+  linkKind: "party" | "location" | "mention" | "documentParty" | "documentLocation";
 };
 
 type TimelineGraphData = {
@@ -1477,6 +1478,19 @@ function buildTimelineGraph(
     return undefined;
   };
   const documentSummaryByName = new Map<string, string>();
+  const documentIndexByName = new Map<string, number>();
+  const parseOptionalIndex = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value.trim());
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
   for (const [documentRecordName, documentRecordValue] of Object.entries(documentsRecord)) {
     const resolvedDocumentName = resolveDocumentRecordName(documentRecordName);
     if (!resolvedDocumentName) {
@@ -1484,11 +1498,17 @@ function buildTimelineGraph(
     }
     const documentRecord = asRecord(documentRecordValue);
     documentSummaryByName.set(resolvedDocumentName, asOptionalString(documentRecord["summary"]) ?? "");
+    const parsedIndex = parseOptionalIndex(documentRecord["index"]);
+    if (typeof parsedIndex === "number") {
+      documentIndexByName.set(resolvedDocumentName, parsedIndex);
+    }
   }
 
   const characterEventMap = new Map<string, Set<number>>();
   const locationEventMap = new Map<string, Set<number>>();
   const documentEventMap = new Map<string, Set<number>>();
+  const documentPartiesByName = new Map<string, Set<string>>();
+  const documentLocationsByName = new Map<string, Set<string>>();
   const nodes: TimelineGraphNode[] = [];
   const links: TimelineGraphLink[] = [];
 
@@ -1573,6 +1593,24 @@ function buildTimelineGraph(
       const eventIndices = documentEventMap.get(mention) ?? new Set<number>();
       eventIndices.add(eventIndex);
       documentEventMap.set(mention, eventIndices);
+
+      const documentParties = documentPartiesByName.get(mention) ?? new Set<string>();
+      for (const partyName of eventParties) {
+        if (!knownCharacters.has(partyName)) {
+          continue;
+        }
+        documentParties.add(partyName);
+      }
+      documentPartiesByName.set(mention, documentParties);
+
+      const documentLocations = documentLocationsByName.get(mention) ?? new Set<string>();
+      for (const locationName of eventLocations) {
+        if (!knownLocations.has(locationName)) {
+          continue;
+        }
+        documentLocations.add(locationName);
+      }
+      documentLocationsByName.set(mention, documentLocations);
     }
   }
 
@@ -1608,6 +1646,31 @@ function buildTimelineGraph(
   }
 
   for (const documentName of documentOrder) {
+    const documentParties = Array.from(documentPartiesByName.get(documentName) ?? []);
+    for (const partyName of documentParties) {
+      if (!knownCharacters.has(partyName)) {
+        continue;
+      }
+      links.push({
+        id: `documentParty:${documentName}:${partyName}`,
+        source: `character:${partyName}`,
+        target: `document:${documentName}`,
+        linkKind: "documentParty"
+      });
+    }
+
+    const documentLocations = Array.from(documentLocationsByName.get(documentName) ?? []);
+    for (const locationName of documentLocations) {
+      links.push({
+        id: `documentLocation:${documentName}:${locationName}`,
+        source: `location:${locationName}`,
+        target: `document:${documentName}`,
+        linkKind: "documentLocation"
+      });
+    }
+  }
+
+  for (const documentName of documentOrder) {
     const connected = getConnectedEventStats(documentEventMap.get(documentName), eventEntries.length);
     nodes.push({
       id: `document:${documentName}`,
@@ -1617,6 +1680,7 @@ function buildTimelineGraph(
       connectedEventSpan: connected.span,
       connectedEventCount: connected.count,
       meanEventIndex: connected.meanIndex,
+      documentIndex: documentIndexByName.get(documentName),
       summary: documentSummaryByName.get(documentName) ?? ""
     });
   }
@@ -1792,7 +1856,15 @@ function getTimelineDashboardHtml(
       .sort((a, b) => (a.eventIndex || 0) - (b.eventIndex || 0));
     const eventCount = eventNodes.length;
     const documentNodes = graph.nodes.filter((node) => node.nodeKind === 'document');
-    const backboneNodes = isDocumentTimeline ? documentNodes : eventNodes;
+    const orderedDocumentNodes = documentNodes.slice().sort((a, b) => {
+      const indexA = Number.isFinite(a.documentIndex) ? a.documentIndex : Number.POSITIVE_INFINITY;
+      const indexB = Number.isFinite(b.documentIndex) ? b.documentIndex : Number.POSITIVE_INFINITY;
+      if (indexA !== indexB) {
+        return indexA - indexB;
+      }
+      return a.name.localeCompare(b.name);
+    });
+    const backboneNodes = isDocumentTimeline ? orderedDocumentNodes : eventNodes;
     const backboneNodeKind = isDocumentTimeline ? 'document' : 'event';
     const backboneCount = backboneNodes.length;
     const backboneLinks = backboneNodes.slice(0, -1).map((sourceNode, index) => ({
@@ -1803,6 +1875,12 @@ function getTimelineDashboardHtml(
     const documentBackboneIndexByName = new Map(backboneNodes.map((node, index) => [node.name, index]));
     const eventCenterIndex = eventCount <= 1 ? 0 : (eventCount - 1) / 2;
     const backboneCenterIndex = backboneCount <= 1 ? 0 : (backboneCount - 1) / 2;
+    const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
+    const characterLikeNodes = graph.nodes.filter((node) => node.nodeKind === 'character' || node.nodeKind === 'location');
+    const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+    const visibleLinks = isDocumentTimeline
+      ? graph.links.filter((link) => link.linkKind !== 'party' && link.linkKind !== 'location')
+      : graph.links.filter((link) => link.linkKind !== 'documentParty' && link.linkKind !== 'documentLocation');
 
     function isBackboneNode(node) {
       return node.nodeKind === backboneNodeKind;
@@ -1816,6 +1894,48 @@ function getTimelineDashboardHtml(
     }
 
     function getNodeBackboneMetrics(node) {
+      if (isDocumentTimeline && node.nodeKind === 'character') {
+        const partyDocumentIndices = visibleLinks
+          .filter((link) => link.linkKind === 'documentParty' && link.source === node.id)
+          .map((link) => {
+            const targetNode = nodeById.get(link.target);
+            return targetNode ? documentBackboneIndexByName.get(targetNode.name) : undefined;
+          })
+          .filter((index) => Number.isFinite(index));
+        if (partyDocumentIndices.length > 0) {
+          const sortedPartyIndices = partyDocumentIndices.slice().sort((a, b) => a - b);
+          const first = sortedPartyIndices[0];
+          const last = sortedPartyIndices[sortedPartyIndices.length - 1];
+          const meanIndex = sortedPartyIndices.reduce((sum, index) => sum + index, 0) / sortedPartyIndices.length;
+          return {
+            connected: true,
+            meanIndex,
+            span: Math.max(0, last - first)
+          };
+        }
+      }
+
+      if (isDocumentTimeline && node.nodeKind === 'location') {
+        const locationDocumentIndices = visibleLinks
+          .filter((link) => link.linkKind === 'documentLocation' && link.source === node.id)
+          .map((link) => {
+            const targetNode = nodeById.get(link.target);
+            return targetNode ? documentBackboneIndexByName.get(targetNode.name) : undefined;
+          })
+          .filter((index) => Number.isFinite(index));
+        if (locationDocumentIndices.length > 0) {
+          const sortedLocationIndices = locationDocumentIndices.slice().sort((a, b) => a - b);
+          const first = sortedLocationIndices[0];
+          const last = sortedLocationIndices[sortedLocationIndices.length - 1];
+          const meanIndex = sortedLocationIndices.reduce((sum, index) => sum + index, 0) / locationDocumentIndices.length;
+          return {
+            connected: true,
+            meanIndex,
+            span: Math.max(0, last - first)
+          };
+        }
+      }
+
       if (isDocumentTimeline && node.nodeKind === 'event') {
         const mentionDocumentIndices = (Array.isArray(node.mentions) ? node.mentions : [])
           .map((mention) => documentBackboneIndexByName.get(mention))
@@ -1842,10 +1962,6 @@ function getTimelineDashboardHtml(
         span: Number.isFinite(node.connectedEventSpan) ? Math.max(0, node.connectedEventSpan) : 0
       };
     }
-
-    const characterNodes = graph.nodes.filter((node) => node.nodeKind === 'character');
-    const characterLikeNodes = graph.nodes.filter((node) => node.nodeKind === 'character' || node.nodeKind === 'location');
-    const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 
     const types = Array.from(new Set(characterNodes.map((node) => node.characterType || 'Unknown'))).sort();
     if (types.length === 0) {
@@ -2116,20 +2232,20 @@ function getTimelineDashboardHtml(
         return '';
       }
 
-      const sourceIsEvent = sourceNode.nodeKind === 'event';
-      const targetIsEvent = targetNode.nodeKind === 'event';
-      if (sourceIsEvent === targetIsEvent) {
+      const sourceIsBackbone = isBackboneNode(sourceNode);
+      const targetIsBackbone = isBackboneNode(targetNode);
+      if (sourceIsBackbone === targetIsBackbone) {
         return 'M' + sourceNode.x + ',' + sourceNode.y + 'L' + targetNode.x + ',' + targetNode.y;
       }
 
-      const eventNode = sourceIsEvent ? sourceNode : targetNode;
-      const entityNode = sourceIsEvent ? targetNode : sourceNode;
-      const direction = entityNode.y < eventNode.y ? -1 : 1;
-      const eventRadius = nodeRadius(eventNode);
-      const startX = eventNode.x;
-      const startY = eventNode.y + direction * (eventRadius + 1);
-      const endX = entityNode.x;
-      const endY = entityNode.y;
+      const backboneNode = sourceIsBackbone ? sourceNode : targetNode;
+      const nonBackboneNode = sourceIsBackbone ? targetNode : sourceNode;
+      const direction = nonBackboneNode.y < backboneNode.y ? -1 : 1;
+      const backboneRadius = nodeRadius(backboneNode);
+      const startX = backboneNode.x;
+      const startY = backboneNode.y + direction * (backboneRadius + 1);
+      const endX = nonBackboneNode.x;
+      const endY = nonBackboneNode.y;
       const deltaY = Math.max(24, Math.abs(endY - startY));
       const controlDelta = Math.max(16, Math.min(170, deltaY * 0.44));
       const control1X = startX;
@@ -2144,7 +2260,7 @@ function getTimelineDashboardHtml(
 
     const link = linkLayer
       .selectAll('path')
-      .data(graph.links, (d) => d.id)
+      .data(visibleLinks, (d) => d.id)
       .join('path')
       .attr('stroke', (d) => (d.linkKind === 'mention' ? dashboardColors.timeline.mentionLink : dashboardColors.timeline.partyLink))
       .attr('stroke-opacity', defaultTimelineLinkOpacity)
@@ -2158,6 +2274,10 @@ function getTimelineDashboardHtml(
         showTooltip(event, [
           d.linkKind === 'mention'
             ? 'Document Mention'
+            : d.linkKind === 'documentParty'
+              ? 'Document Party'
+            : d.linkKind === 'documentLocation'
+              ? 'Document Location'
             : d.linkKind === 'location'
               ? 'Location Involvement'
               : 'Character Participation',
@@ -2287,7 +2407,7 @@ function getTimelineDashboardHtml(
       .attr('pointer-events', 'none')
       .text((d) => d.name);
 
-    const linkForce = d3.forceLink(graph.links)
+    const linkForce = d3.forceLink(visibleLinks)
       .id((d) => d.id)
       .distance((d) => (d.linkKind === 'mention' ? Math.max(24, backboneDx * 0.8) : Math.max(28, backboneDx * 0.9)))
       .strength(0.08);

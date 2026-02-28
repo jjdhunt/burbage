@@ -3,10 +3,10 @@
 Burbage is a VS Code extension for entity synchronization in structured text projects.
 
 Entity schemas in `Entities/`:
-- `documents.yaml` (one summary record per Manuscript document plus document order index)
+- `documents.yaml`
 - `characters.yaml`
-- `locations.yaml` (location definitions with `region`)
-- `geography.yaml` (location-to-location connections as undirected pairs; one entry per unordered pair)
+- `locations.yaml`
+- `geography.yaml`
 - `events.yaml`
 - `relationships.yaml`
 
