@@ -26,6 +26,7 @@ Current command surface (`package.json`):
 - `burbage.openLocationsHierarchyDashboard`
 - `burbage.openGeographyDashboard`
 - `burbage.openCausalDiagramDashboard`
+- `burbage.openVonnegutDashboard`
 
 Runtime dependency:
 - `yaml`
@@ -89,6 +90,12 @@ Also:
 - Causal Diagram Dashboard:
   - source: `events.yaml` causal fields
 
+- Vonnegut Diagram Dashboard:
+  - valence scatterplot from `events.yaml.valence`
+  - toggle between event-sequence x-axis and document-sequence x-axis
+  - document valence computed as mean of valenced events mentioning each document
+  - smooth moving average curve (window = 3)
+
 All dashboards support snapshot export and watcher-driven refresh.
 
 ### 4. Codex Integration
@@ -110,19 +117,13 @@ All dashboards support snapshot export and watcher-driven refresh.
   - `documents.yaml.index`
   - `events.yaml.mentions`
 
-2. Vonnegut Diagram
-- Story valence trajectory using `events.yaml.valence`.
-- Two x-axis modes:
-  - events on x-axis
-  - documents/chapters on x-axis (aggregate event valence per document)
-
-3. Tables: Plot Grid
+2. Tables: Plot Grid
 - Matrix view:
   - rows: characters
   - columns: events
   - cell: character role in event
 
-4. Tables: Chapter Summary Timeline
+3. Tables: Chapter Summary Timeline
 - Row-based chapter/document summary table.
 - Each row is one chapter/document summary.
 

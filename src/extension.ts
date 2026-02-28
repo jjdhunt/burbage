@@ -87,6 +87,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("burbage.openCausalDiagramDashboard", async () => {
       await openCausalDiagramDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openVonnegutDashboard", async () => {
+      await openVonnegutDashboard(context);
     })
   );
 }
@@ -210,6 +213,7 @@ type CausalGraphData = {
 
 type LocationDashboardMode = "hierarchy" | "geography";
 type TimelineDashboardMode = "event" | "document";
+type VonnegutDashboardMode = "event" | "document";
 
 type TimelineDashboardState = {
   panel: vscode.WebviewPanel;
@@ -237,6 +241,42 @@ type CausalDashboardState = {
   refreshTimer?: NodeJS.Timeout;
 };
 
+type VonnegutEventPoint = {
+  id: string;
+  name: string;
+  orderIndex: number;
+  valence?: number;
+  date: string;
+  summary: string;
+  mentions: string[];
+};
+
+type VonnegutDocumentPoint = {
+  id: string;
+  name: string;
+  orderIndex: number;
+  documentIndex?: number;
+  valence?: number;
+  eventCount: number;
+  summary: string;
+};
+
+type VonnegutGraphData = {
+  events: VonnegutEventPoint[];
+  documents: VonnegutDocumentPoint[];
+  smoothingWindow: number;
+  sourceLabel: string;
+};
+
+type VonnegutDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  graph: VonnegutGraphData;
+  mode: VonnegutDashboardMode;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
 type DashboardHtmlOptions = {
   includeSaveButton?: boolean;
   standaloneDarkMode?: boolean;
@@ -245,6 +285,7 @@ type DashboardHtmlOptions = {
 let relationshipDashboardState: RelationshipDashboardState | undefined;
 let causalDashboardState: CausalDashboardState | undefined;
 let timelineDashboardState: TimelineDashboardState | undefined;
+let vonnegutDashboardState: VonnegutDashboardState | undefined;
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -971,6 +1012,148 @@ function disposeTimelineDashboardState(state: TimelineDashboardState): void {
   state.watchers = [];
 }
 
+function getVonnegutDashboardMeta(mode: VonnegutDashboardMode): {
+  modeTitle: string;
+  saveFileName: string;
+} {
+  if (mode === "document") {
+    return {
+      modeTitle: "Document Vonnegut Diagram",
+      saveFileName: "vonnegut-document-diagram.html"
+    };
+  }
+  return {
+    modeTitle: "Event Vonnegut Diagram",
+    saveFileName: "vonnegut-event-diagram.html"
+  };
+}
+
+async function openVonnegutDashboard(context: vscode.ExtensionContext): Promise<void> {
+  await openVonnegutDashboardByMode(context, "document");
+}
+
+async function openVonnegutDashboardByMode(
+  context: vscode.ExtensionContext,
+  mode: VonnegutDashboardMode
+): Promise<void> {
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the Vonnegut diagram dashboard.");
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+
+    if (vonnegutDashboardState && vonnegutDashboardState.workspaceRoot === workspaceRoot) {
+      vonnegutDashboardState.panel.reveal(vscode.ViewColumn.One, true);
+      if (vonnegutDashboardState.mode !== mode) {
+        vonnegutDashboardState.mode = mode;
+        await vonnegutDashboardState.panel.webview.postMessage({ type: "setVonnegutMode", mode });
+      }
+      return;
+    }
+
+    if (vonnegutDashboardState) {
+      disposeVonnegutDashboardState(vonnegutDashboardState);
+      vonnegutDashboardState = undefined;
+    }
+
+    const graph = await loadVonnegutGraph(workspaceRoot);
+
+    const panel = vscode.window.createWebviewPanel(
+      "burbage.vonnegutDashboard",
+      "Burbage: Vonnegut Diagram",
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+
+    const state: VonnegutDashboardState = {
+      panel,
+      workspaceRoot,
+      graph,
+      mode,
+      watchers: []
+    };
+    vonnegutDashboardState = state;
+
+    panel.webview.html = getVonnegutDashboardHtml(graph, mode);
+
+    const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (isSaveDashboardMessage(message)) {
+        await saveVonnegutDashboardSnapshot(state);
+        return;
+      }
+      if (isVonnegutModeChangedMessage(message)) {
+        state.mode = message.mode;
+      }
+    });
+    context.subscriptions.push(messageDisposable);
+
+    for (const relativePath of ["Entities/events.yaml", "Entities/documents.yaml", "Manuscript/**"]) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => scheduleVonnegutDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (vonnegutDashboardState === state) {
+        vonnegutDashboardState = undefined;
+      }
+      disposeVonnegutDashboardState(state);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not open Vonnegut diagram dashboard: ${message}`);
+  }
+}
+
+function scheduleVonnegutDashboardRefresh(state: VonnegutDashboardState): void {
+  if (vonnegutDashboardState !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshVonnegutDashboard(state, false);
+  }, 180);
+}
+
+async function refreshVonnegutDashboard(state: VonnegutDashboardState, showErrorToUser: boolean): Promise<void> {
+  if (vonnegutDashboardState !== state) {
+    return;
+  }
+  try {
+    const graph = await loadVonnegutGraph(state.workspaceRoot);
+    state.graph = graph;
+    state.panel.webview.html = getVonnegutDashboardHtml(graph, state.mode);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not refresh Vonnegut diagram dashboard: ${message}`);
+  }
+}
+
+function disposeVonnegutDashboardState(state: VonnegutDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
+}
+
 async function openCausalDiagramDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -1287,6 +1470,22 @@ async function saveLocationsDashboardSnapshot(state: LocationDashboardState): Pr
   }
 }
 
+async function saveVonnegutDashboardSnapshot(state: VonnegutDashboardState): Promise<void> {
+  try {
+    const dashboardMeta = getVonnegutDashboardMeta(state.mode);
+    const html = getVonnegutDashboardHtml(state.graph, state.mode, {
+      includeSaveButton: false,
+      standaloneDarkMode: true
+    });
+    const outputPath = await writeDashboardSnapshotFile(state.workspaceRoot, dashboardMeta.saveFileName, html);
+    vscode.window.showInformationMessage(`Saved ${dashboardMeta.modeTitle.toLowerCase()} to ${relativeToWorkspace(outputPath, state.workspaceRoot)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const dashboardMeta = getVonnegutDashboardMeta(state.mode);
+    vscode.window.showErrorMessage(`Could not save ${dashboardMeta.modeTitle.toLowerCase()}: ${message}`);
+  }
+}
+
 async function writeDashboardSnapshotFile(workspaceRoot: string, fileName: string, html: string): Promise<string> {
   const dashboardsDirPath = path.join(workspaceRoot, "dashboards");
   await fs.mkdir(dashboardsDirPath, { recursive: true });
@@ -1305,6 +1504,23 @@ async function loadCausalGraph(workspaceRoot: string): Promise<CausalGraphData> 
 
   const eventsRaw = await fs.readFile(eventsPath, "utf8");
   return buildCausalGraph(parseYaml(eventsRaw), "Entities/");
+}
+
+async function loadVonnegutGraph(workspaceRoot: string): Promise<VonnegutGraphData> {
+  const sources = await resolveVonnegutDataSources(workspaceRoot);
+  const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
+  const documentsPath = path.join(sources.entitiesDirPath, "documents.yaml");
+  const [eventsRaw, documentsRaw, manuscriptDocuments] = await Promise.all([
+    fs.readFile(eventsPath, "utf8"),
+    pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
+    listManuscriptDocuments(sources.manuscriptDirPath)
+  ]);
+  return buildVonnegutGraph(
+    parseYaml(eventsRaw),
+    parseYaml(documentsRaw),
+    manuscriptDocuments,
+    sources.sourceLabel
+  );
 }
 
 async function loadLocationGraph(workspaceRoot: string, mode: LocationDashboardMode): Promise<LocationGraphData> {
@@ -1368,6 +1584,25 @@ async function resolveTimelineDataSources(workspaceRoot: string): Promise<{
   }
 
   throw new Error("Missing characters.yaml/events.yaml in Entities/ or missing Manuscript/ directory.");
+}
+
+async function resolveVonnegutDataSources(workspaceRoot: string): Promise<{
+  entitiesDirPath: string;
+  manuscriptDirPath: string;
+  sourceLabel: string;
+}> {
+  const entitiesDirPath = path.join(workspaceRoot, "Entities");
+  const manuscriptDirPath = path.join(workspaceRoot, "Manuscript");
+  const hasEvents = await pathExists(path.join(entitiesDirPath, "events.yaml"));
+  const hasManuscriptDir = await pathExists(manuscriptDirPath);
+  if (hasEvents && hasManuscriptDir) {
+    return {
+      entitiesDirPath,
+      manuscriptDirPath,
+      sourceLabel: "Entities/ + Manuscript/"
+    };
+  }
+  throw new Error("Missing events.yaml in Entities/ or missing Manuscript/ directory.");
 }
 
 function buildTimelineGraph(
@@ -1674,6 +1909,175 @@ function buildTimelineGraph(
   return {
     nodes,
     links,
+    sourceLabel
+  };
+}
+
+function buildVonnegutGraph(
+  eventsDocument: unknown,
+  documentsDocument: unknown,
+  manuscriptDocuments: string[],
+  sourceLabel: string
+): VonnegutGraphData {
+  const eventsRecord = asRecord(eventsDocument);
+  const documentsRecord = asRecord(documentsDocument);
+  const eventEntries = Object.entries(eventsRecord);
+  const smoothingWindow = 3;
+
+  const parseOptionalNumber = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value.trim());
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const documentOrder: string[] = [];
+  const knownDocuments = new Set<string>();
+  for (const manuscriptDocument of manuscriptDocuments) {
+    const normalized = normalizeDocumentReference(manuscriptDocument);
+    if (!normalized || knownDocuments.has(normalized)) {
+      continue;
+    }
+    knownDocuments.add(normalized);
+    documentOrder.push(normalized);
+  }
+
+  const documentsByLower = new Map<string, string>();
+  const documentsByBasenameLower = new Map<string, string[]>();
+  const documentsByStemLower = new Map<string, string[]>();
+  for (const documentName of documentOrder) {
+    documentsByLower.set(documentName.toLowerCase(), documentName);
+
+    const basenameLower = path.posix.basename(documentName).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    basenameMatches.push(documentName);
+    documentsByBasenameLower.set(basenameLower, basenameMatches);
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    stemMatches.push(documentName);
+    documentsByStemLower.set(stemLower, stemMatches);
+  }
+
+  const resolveDocumentName = (documentReference: string): string | undefined => {
+    const normalizedReference = normalizeDocumentReference(documentReference);
+    if (!normalizedReference) {
+      return undefined;
+    }
+    const exact = documentsByLower.get(normalizedReference.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+
+    const basenameLower = path.posix.basename(normalizedReference).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    if (basenameMatches.length === 1) {
+      return basenameMatches[0];
+    }
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    if (stemMatches.length === 1) {
+      return stemMatches[0];
+    }
+
+    return undefined;
+  };
+
+  const documentSummaryByName = new Map<string, string>();
+  const documentIndexByName = new Map<string, number>();
+  for (const [documentRecordName, documentRecordValue] of Object.entries(documentsRecord)) {
+    const resolvedDocumentName = resolveDocumentName(documentRecordName);
+    if (!resolvedDocumentName) {
+      continue;
+    }
+    const documentRecord = asRecord(documentRecordValue);
+    documentSummaryByName.set(resolvedDocumentName, asOptionalString(documentRecord["summary"]) ?? "");
+    const parsedIndex = parseOptionalNumber(documentRecord["index"]);
+    if (typeof parsedIndex === "number") {
+      documentIndexByName.set(resolvedDocumentName, parsedIndex);
+    }
+  }
+
+  const eventPoints: VonnegutEventPoint[] = [];
+  const documentValencesByName = new Map<string, number[]>();
+  for (let eventIndex = 0; eventIndex < eventEntries.length; eventIndex += 1) {
+    const [eventName, eventValue] = eventEntries[eventIndex];
+    const event = asRecord(eventValue);
+    const valence = parseOptionalNumber(event["valence"]);
+    const mentions = toUniqueStrings(
+      asStringArray(event["mentions"])
+        .map((mention) => resolveDocumentName(mention))
+        .filter((mention): mention is string => typeof mention === "string")
+    );
+
+    eventPoints.push({
+      id: `event:${eventName}`,
+      name: eventName,
+      orderIndex: eventIndex,
+      valence,
+      date: asOptionalString(event["date"]) ?? "",
+      summary: asOptionalString(event["summary"]) ?? "",
+      mentions
+    });
+
+    if (!Number.isFinite(valence)) {
+      continue;
+    }
+    const eventValence = valence as number;
+    for (const mention of mentions) {
+      if (!knownDocuments.has(mention)) {
+        continue;
+      }
+      const values = documentValencesByName.get(mention) ?? [];
+      values.push(eventValence);
+      documentValencesByName.set(mention, values);
+    }
+  }
+
+  const sortedDocumentNames = documentOrder.slice().sort((a, b) => {
+    const indexA = documentIndexByName.get(a);
+    const indexB = documentIndexByName.get(b);
+    const hasA = Number.isFinite(indexA);
+    const hasB = Number.isFinite(indexB);
+    if (hasA && hasB && indexA !== indexB) {
+      return (indexA as number) - (indexB as number);
+    }
+    if (hasA && !hasB) {
+      return -1;
+    }
+    if (!hasA && hasB) {
+      return 1;
+    }
+    return a.localeCompare(b);
+  });
+
+  const documentPoints: VonnegutDocumentPoint[] = sortedDocumentNames.map((documentName, orderIndex) => {
+    const valenceSamples = documentValencesByName.get(documentName) ?? [];
+    const valence = valenceSamples.length > 0
+      ? valenceSamples.reduce((sum, sample) => sum + sample, 0) / valenceSamples.length
+      : undefined;
+    return {
+      id: `document:${documentName}`,
+      name: documentName,
+      orderIndex,
+      documentIndex: documentIndexByName.get(documentName),
+      valence,
+      eventCount: valenceSamples.length,
+      summary: documentSummaryByName.get(documentName) ?? ""
+    };
+  });
+
+  return {
+    events: eventPoints,
+    documents: documentPoints,
+    smoothingWindow,
     sourceLabel
   };
 }
@@ -2610,6 +3014,454 @@ function getTimelineDashboardHtml(
       });
 
     node.call(drag);
+  </script>
+</body>
+</html>`;
+}
+
+function getVonnegutDashboardHtml(
+  graph: VonnegutGraphData,
+  mode: VonnegutDashboardMode,
+  options: DashboardHtmlOptions = {}
+): string {
+  const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const modeJson = JSON.stringify(mode).replace(/</g, "\\u003c");
+  const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
+  const includeSaveButton = options.includeSaveButton ?? true;
+  const standaloneDarkMode = options.standaloneDarkMode ?? false;
+  const rootCssVars = standaloneDarkMode
+    ? `color-scheme: dark;
+      --dashboard-bg: #0f1318;
+      --dashboard-fg: #e7edf3;
+      --dashboard-border: #2a3340;
+      --dashboard-widget-bg: #181f28;
+      --dashboard-description: #9aa7b8;
+      --dashboard-tooltip-bg: rgba(21, 28, 36, 0.95);
+      --dashboard-tooltip-fg: #f3f6fb;
+      --dashboard-font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;`
+    : `color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-tooltip-bg: var(--vscode-editorHoverWidget-background, rgba(30,30,30,0.95));
+      --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
+  const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
+  const modeToggleHtml = `<div class="mode-toggle" role="group" aria-label="Vonnegut mode">
+    <button id="mode-event" class="mode-button" type="button">Event View</button>
+    <button id="mode-document" class="mode-button" type="button">Document View</button>
+  </div>`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      ${rootCssVars}
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
+      overflow: hidden;
+    }
+    .root {
+      width: 100%;
+      height: 100%;
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+    }
+    .tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 460px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-tooltip-bg);
+      color: var(--dashboard-tooltip-fg);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      display: none;
+      font-size: 12px;
+    }
+    .legend {
+      position: fixed;
+      left: 14px;
+      bottom: 14px;
+      z-index: 100;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      max-width: min(42vw, 480px);
+    }
+    .legend-title {
+      margin: 0 0 6px 0;
+      color: var(--dashboard-description);
+    }
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    .swatch {
+      width: 12px;
+      height: 2px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .save-button {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 120;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .mode-toggle {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 120;
+      display: inline-flex;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 8px;
+    }
+    .mode-button {
+      border: 1px solid var(--dashboard-border);
+      background: transparent;
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .mode-button.active {
+      background: rgba(120, 170, 220, 0.25);
+      border-color: rgba(120, 170, 220, 0.75);
+    }
+  </style>
+</head>
+<body>
+  ${saveButtonHtml}
+  ${modeToggleHtml}
+  <div class="root">
+    <svg id="graph"></svg>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+  <div id="legend" class="legend"></div>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script>
+    const graph = ${graphJson};
+    const initialMode = ${modeJson};
+    const dashboardColors = ${dashboardColorsJson};
+    const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
+    const svg = d3.select('#graph');
+    const tooltip = document.getElementById('tooltip');
+    const legend = document.getElementById('legend');
+    const saveButton = document.getElementById('save-dashboard');
+    const modeEventButton = document.getElementById('mode-event');
+    const modeDocumentButton = document.getElementById('mode-document');
+    const margin = { top: 34, right: 44, bottom: 132, left: 58 };
+    let currentMode = initialMode;
+    let width = 0;
+    let height = 0;
+
+    function isValidMode(value) {
+      return value === 'event' || value === 'document';
+    }
+
+    function modeColor() {
+      return currentMode === 'document' ? dashboardColors.timeline.documentNode : dashboardColors.timeline.eventNode;
+    }
+
+    function currentPoints() {
+      return currentMode === 'document' ? graph.documents : graph.events;
+    }
+
+    function setSize() {
+      const rect = document.body.getBoundingClientRect();
+      width = Math.max(440, rect.width);
+      height = Math.max(340, rect.height);
+      svg.attr('viewBox', [0, 0, width, height]);
+    }
+
+    function updateModeButtons() {
+      if (modeEventButton) {
+        modeEventButton.classList.toggle('active', currentMode === 'event');
+      }
+      if (modeDocumentButton) {
+        modeDocumentButton.classList.toggle('active', currentMode === 'document');
+      }
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = 'none';
+      tooltip.textContent = '';
+    }
+
+    function positionTooltip(event) {
+      const offset = 14;
+      const maxX = window.innerWidth - tooltip.offsetWidth - 8;
+      const maxY = window.innerHeight - tooltip.offsetHeight - 8;
+      const x = Math.min(maxX, event.clientX + offset);
+      const y = Math.min(maxY, event.clientY + offset);
+      tooltip.style.left = Math.max(8, x) + 'px';
+      tooltip.style.top = Math.max(8, y) + 'px';
+    }
+
+    function showTooltip(event, rows) {
+      tooltip.textContent = rows.filter(Boolean).join('\\n');
+      tooltip.style.display = 'block';
+      positionTooltip(event);
+    }
+
+    function formatValence(value) {
+      if (!Number.isFinite(value)) {
+        return '(unknown)';
+      }
+      return Number(value).toFixed(2);
+    }
+
+    function buildMovingAverageSeries(points, windowSize) {
+      const series = [];
+      if (!Array.isArray(points) || points.length === 0 || windowSize <= 0) {
+        return series;
+      }
+      for (let index = 0; index <= points.length - windowSize; index += 1) {
+        const windowPoints = points.slice(index, index + windowSize);
+        const valid = windowPoints.filter((point) => Number.isFinite(point.valence));
+        if (valid.length === 0) {
+          continue;
+        }
+        const average = valid.reduce((sum, point) => sum + point.valence, 0) / valid.length;
+        series.push({
+          xIndex: index + (windowSize - 1) / 2,
+          valence: average
+        });
+      }
+      return series;
+    }
+
+    function renderLegend() {
+      legend.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'legend-title';
+      title.textContent = 'Series';
+      legend.appendChild(title);
+
+      const rows = [
+        { label: currentMode === 'document' ? 'Document valence' : 'Event valence', color: modeColor() },
+        { label: graph.smoothingWindow + '-point moving average', color: modeColor() }
+      ];
+      for (const rowData of rows) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = rowData.color;
+        const label = document.createElement('span');
+        label.textContent = rowData.label;
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legend.appendChild(row);
+      }
+    }
+
+    function render() {
+      setSize();
+      hideTooltip();
+      svg.selectAll('*').remove();
+      renderLegend();
+
+      const points = currentPoints();
+      const plotLeft = margin.left;
+      const plotRight = width - margin.right;
+      const plotTop = margin.top;
+      const plotBottom = height - margin.bottom;
+      const domainMax = Math.max(1, points.length - 1);
+
+      const allValences = [...graph.events, ...graph.documents]
+        .map((point) => point.valence)
+        .filter((value) => Number.isFinite(value));
+      const minValence = allValences.length > 0 ? Math.min(...allValences, 0) : -1;
+      const maxValence = allValences.length > 0 ? Math.max(...allValences, 0) : 1;
+      const pad = Math.max(0.6, (maxValence - minValence) * 0.12);
+
+      const x = d3.scaleLinear().domain([0, domainMax]).range([plotLeft, plotRight]);
+      const y = d3.scaleLinear().domain([minValence - pad, maxValence + pad]).nice().range([plotBottom, plotTop]);
+
+      const layer = svg.append('g');
+      layer.append('line')
+        .attr('x1', plotLeft)
+        .attr('x2', plotRight)
+        .attr('y1', y(0))
+        .attr('y2', y(0))
+        .attr('stroke', 'var(--dashboard-border)')
+        .attr('stroke-width', 1)
+        .attr('stroke-opacity', 0.7);
+
+      const xAxis = d3.axisBottom(x)
+        .ticks(Math.max(2, Math.min(8, points.length)))
+        .tickFormat((value) => String(Math.round(Number(value) + 1)));
+      const yAxis = d3.axisLeft(y).ticks(8);
+
+      layer.append('g')
+        .attr('transform', 'translate(0,' + plotBottom + ')')
+        .attr('color', 'var(--dashboard-description)')
+        .call(xAxis);
+
+      layer.append('g')
+        .attr('transform', 'translate(' + plotLeft + ',0)')
+        .attr('color', 'var(--dashboard-description)')
+        .call(yAxis);
+
+      layer.append('text')
+        .attr('x', plotLeft)
+        .attr('y', 16)
+        .attr('fill', 'var(--dashboard-description)')
+        .attr('font-size', 11)
+        .text(currentMode === 'document' ? 'Document Sequence' : 'Event Sequence');
+
+      layer.append('text')
+        .attr('x', 12)
+        .attr('y', plotTop - 8)
+        .attr('fill', 'var(--dashboard-description)')
+        .attr('font-size', 11)
+        .text('Valence');
+
+      const movingAverage = buildMovingAverageSeries(points, graph.smoothingWindow);
+      const line = d3.line()
+        .defined((point) => Number.isFinite(point.valence))
+        .x((point) => x(point.xIndex))
+        .y((point) => y(point.valence))
+        .curve(d3.curveMonotoneX);
+
+      layer.append('path')
+        .datum(movingAverage)
+        .attr('d', line)
+        .attr('fill', 'none')
+        .attr('stroke', modeColor())
+        .attr('stroke-width', 2.8)
+        .attr('stroke-opacity', 0.92);
+
+      const pointGroup = layer.append('g');
+      pointGroup.selectAll('circle')
+        .data(points, (d) => d.id)
+        .join('circle')
+        .attr('cx', (d) => x(d.orderIndex))
+        .attr('cy', (d) => y(Number.isFinite(d.valence) ? d.valence : 0))
+        .attr('r', 6.8)
+        .attr('fill', (d) => (Number.isFinite(d.valence) ? modeColor() : 'transparent'))
+        .attr('stroke', modeColor())
+        .attr('stroke-width', 1.5)
+        .attr('stroke-dasharray', (d) => (Number.isFinite(d.valence) ? null : '4,3'))
+        .on('mouseover', (event, d) => {
+          if (currentMode === 'event') {
+            showTooltip(event, [
+              d.name,
+              'Valence: ' + formatValence(d.valence),
+              d.date ? 'Date: ' + d.date : 'Date: (unknown)',
+              d.summary ? 'Summary: ' + d.summary : 'Summary: (none)',
+              Array.isArray(d.mentions) && d.mentions.length > 0 ? 'Mentions: ' + d.mentions.join(', ') : 'Mentions: (none)'
+            ]);
+            return;
+          }
+          showTooltip(event, [
+            d.name,
+            'Valence: ' + formatValence(d.valence),
+            'Contributing events: ' + (Number.isFinite(d.eventCount) ? d.eventCount : 0),
+            d.summary ? 'Summary: ' + d.summary : 'Summary: (none)'
+          ]);
+        })
+        .on('mousemove', (event) => {
+          if (tooltip.style.display !== 'block') return;
+          positionTooltip(event);
+        })
+        .on('mouseout', hideTooltip);
+
+      layer.append('g')
+        .selectAll('text')
+        .data(points, (d) => d.id)
+        .join('text')
+        .attr('font-size', 11)
+        .attr('fill', 'var(--dashboard-fg)')
+        .attr('dominant-baseline', 'hanging')
+        .attr('pointer-events', 'none')
+        .attr('transform', (d) => {
+          const labelY = y(Number.isFinite(d.valence) ? d.valence : 0) + 8;
+          return 'translate(' + (x(d.orderIndex) + 7) + ',' + labelY + ') rotate(45)';
+        })
+        .text((d) => d.name);
+    }
+
+    function switchMode(nextMode, emit = true) {
+      if (!isValidMode(nextMode) || nextMode === currentMode) {
+        return;
+      }
+      currentMode = nextMode;
+      updateModeButtons();
+      render();
+      if (emit && vscodeApi) {
+        vscodeApi.postMessage({ type: 'vonnegutModeChanged', mode: currentMode });
+      }
+    }
+
+    if (saveButton && vscodeApi) {
+      saveButton.addEventListener('click', () => {
+        vscodeApi.postMessage({ type: 'saveDashboard' });
+      });
+    }
+    if (saveButton && !vscodeApi) {
+      saveButton.style.display = 'none';
+    }
+    if (modeEventButton) {
+      modeEventButton.addEventListener('click', () => {
+        switchMode('event');
+      });
+    }
+    if (modeDocumentButton) {
+      modeDocumentButton.addEventListener('click', () => {
+        switchMode('document');
+      });
+    }
+    window.addEventListener('message', (event) => {
+      const message = event.data;
+      if (!message || message.type !== 'setVonnegutMode' || !isValidMode(message.mode)) {
+        return;
+      }
+      switchMode(message.mode, false);
+    });
+    window.addEventListener('resize', () => {
+      render();
+    });
+
+    updateModeButtons();
+    render();
   </script>
 </body>
 </html>`;
@@ -3933,6 +4785,7 @@ type SendPromptMessage = { type: "sendPrompt"; text: string };
 type SyncMessage = { type: "sync" };
 type SaveDashboardMessage = { type: "saveDashboard" };
 type TimelineModeMessage = { type: "setTimelineMode" | "timelineModeChanged"; mode: TimelineDashboardMode };
+type VonnegutModeMessage = { type: "setVonnegutMode" | "vonnegutModeChanged"; mode: VonnegutDashboardMode };
 
 function isSendPromptMessage(value: unknown): value is SendPromptMessage {
   if (typeof value !== "object" || value === null) {
@@ -3962,6 +4815,14 @@ function isTimelineModeChangedMessage(value: unknown): value is TimelineModeMess
   }
   const maybe = value as { type?: unknown; mode?: unknown };
   return maybe.type === "timelineModeChanged" && (maybe.mode === "event" || maybe.mode === "document");
+}
+
+function isVonnegutModeChangedMessage(value: unknown): value is VonnegutModeMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const maybe = value as { type?: unknown; mode?: unknown };
+  return maybe.type === "vonnegutModeChanged" && (maybe.mode === "event" || maybe.mode === "document");
 }
 
 function getWorkspaceRootOrThrow(): string {
