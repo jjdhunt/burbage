@@ -1910,7 +1910,7 @@ function buildTimelineGraph(
         .map((mention) => resolveEventMentionDocument(mention))
         .filter((mention): mention is string => typeof mention === "string")
     );
-    const eventParties = toUniqueStrings(asStringArray(event["parties"]));
+    const eventParties = parseEventPartyNames(event["parties"]);
     const eventLocations = toUniqueStrings(asStringArray(event["locations"]));
     const eventId = `event:${eventName}`;
 
@@ -5288,6 +5288,7 @@ async function runSetupProject(context: vscode.ExtensionContext): Promise<void> 
   await ensureLocalCodexRuntime(workspaceRoot, summary);
   await ensureGitignoreEntry(workspaceRoot, ".burbage/runtime/", summary);
   await ensureGitignoreEntry(workspaceRoot, "AGENTS.md", summary);
+  await ensureGitignoreEntry(workspaceRoot, ".DS_Store", summary);
   await ensureCodexLogin(workspaceRoot, summary);
 
   await vscode.window.showInformationMessage(
@@ -6409,6 +6410,29 @@ function asStringArray(value: unknown): string[] {
   return value
     .map((item) => asOptionalString(item))
     .filter((item): item is string => typeof item === "string");
+}
+
+function parseEventPartyNames(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const names: string[] = [];
+  for (const item of value) {
+    const partyRecord = asRecord(item);
+    for (const [partyName, partyValue] of Object.entries(partyRecord)) {
+      const normalizedPartyName = asOptionalString(partyName);
+      if (!normalizedPartyName) {
+        continue;
+      }
+      const partyDetails = asRecord(partyValue);
+      if (asOptionalString(partyDetails["role"])) {
+        names.push(normalizedPartyName);
+      }
+    }
+  }
+
+  return toUniqueStrings(names);
 }
 
 function normalizeDocumentReference(reference: string): string | undefined {

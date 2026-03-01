@@ -119,7 +119,9 @@ Structure:
   mentions: [<document reference>, ...]
   date: <in-universe time marker or `null`>
   locations: [<location name>, ...]
-  parties: [<character name>, ...]
+  parties:
+    - <character name>:
+        role: <brief explanation of the character's role in the event>
   summary: <short prose description>
   valence: <protagonist goodness score, integer>
   causes: [<event that caused this one>, ...]
@@ -131,9 +133,11 @@ Field definitions:
 - `mentions` (Required): list of Manuscript documents that mention the event.
 - `date` (Optional): in-universe time marker.
 - `locations` (Optional): list of location keys; if non-empty, must match keys in `Entities/locations.yaml`.
-- `parties` (Optional): list of character/entity keys; if non-empty, must match keys in `Entities/characters.yaml`.
+- `parties` (Optional): list of party-mapping objects. Each list item maps a character involved in the event to an object that includes:
+  - `role` (Required): brief explanation of the character's role in the event.
+  Non-empty party keys must match keys in `Entities/characters.yaml`.
 - `summary` (Required): short prose description.
-- `valence` (Required): subjective 'goodness' score, from the perspective of the protagonist. 1-10, with 1 - worst thing that happens in the Manuscript, 10 - best thing that happens in the Manuscript.
+- `valence` (Required): subjective good/bad fortune score, from the perspective of the protagonist. 1-10, with 1 - worst thing that happens in the Manuscript, 10 - best thing that happens in the Manuscript.
 - `causes` (Optional): list of event(s) that most directly caused this one, or empty if no known, distinct event caused it; if non-empty, must match other keys in `Entities/events.yaml`. May be empty if the event was: a random occurrence (e.g. two people meet by chance), a character's independent decision (e.g. a person spontaneously decides to go for a walk), a periodic/seasonal event (e.g. the sun rose), or the cause is never specified in the Manuscript. Typically, causal relationships should be acyclic and chronological, but this is not strictly enforced because some fictional narratives may violate physical/logical constraints.
 - `explanation` (Optional): Manuscript-supported explanation of how the cause(s) resulted in the event. `null` for events with empty `causes`.
 
