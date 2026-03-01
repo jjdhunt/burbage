@@ -103,14 +103,15 @@ Also:
   - y-value is number of events mentioning each document
   - smooth moving average curve (window = 3)
 
-- Plot Grid Dashboard (CSV scaffold):
-  - opening dashboard command writes:
-    - `dashboards/plot-grid-events.csv`
-    - `dashboards/plot-grid-documents.csv`
+- Plot Grid Dashboard:
+  - toggle between Event and Document views
   - rows: characters
-  - columns: events (events CSV) or documents (documents CSV)
+  - columns: events or documents
   - header row for event/document names and subheader row for summaries
   - cell values from `events.yaml.parties` role mappings
+  - also writes CSV exports:
+    - `dashboards/plot-grid-events.csv`
+    - `dashboards/plot-grid-documents.csv`
 
 All dashboards support snapshot export and watcher-driven refresh.
 

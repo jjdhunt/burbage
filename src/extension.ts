@@ -306,6 +306,25 @@ type PacingDashboardState = {
   refreshTimer?: NodeJS.Timeout;
 };
 
+type PlotGridData = {
+  eventRows: string[][];
+  documentRows: string[][];
+  sourceLabel: string;
+};
+
+type PlotGridBuildOutputs = PlotGridData & {
+  eventCsv: string;
+  documentCsv: string;
+};
+
+type PlotGridDashboardState = {
+  panel: vscode.WebviewPanel;
+  workspaceRoot: string;
+  data: PlotGridData;
+  watchers: vscode.FileSystemWatcher[];
+  refreshTimer?: NodeJS.Timeout;
+};
+
 type DashboardHtmlOptions = {
   includeSaveButton?: boolean;
   standaloneDarkMode?: boolean;
@@ -316,6 +335,7 @@ let causalDashboardState: CausalDashboardState | undefined;
 let timelineDashboardState: TimelineDashboardState | undefined;
 let vonnegutDashboardState: VonnegutDashboardState | undefined;
 let pacingDashboardState: PacingDashboardState | undefined;
+let plotGridDashboardState: PlotGridDashboardState | undefined;
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -1295,7 +1315,7 @@ function disposePacingDashboardState(state: PacingDashboardState): void {
   state.watchers = [];
 }
 
-async function openPlotGridDashboard(_context: vscode.ExtensionContext): Promise<void> {
+async function openPlotGridDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
@@ -1303,14 +1323,114 @@ async function openPlotGridDashboard(_context: vscode.ExtensionContext): Promise
       return;
     }
     const workspaceRoot = workspaceFolder.uri.fsPath;
-    const output = await generatePlotGridCsvs(workspaceRoot);
-    const eventPathLabel = relativeToWorkspace(output.eventCsvPath, workspaceRoot);
-    const documentPathLabel = relativeToWorkspace(output.documentCsvPath, workspaceRoot);
+
+    if (plotGridDashboardState && plotGridDashboardState.workspaceRoot === workspaceRoot) {
+      plotGridDashboardState.panel.reveal(vscode.ViewColumn.One, true);
+      await refreshPlotGridDashboard(plotGridDashboardState, true);
+      return;
+    }
+
+    if (plotGridDashboardState) {
+      disposePlotGridDashboardState(plotGridDashboardState);
+      plotGridDashboardState = undefined;
+    }
+
+    const output = await loadPlotGridData(workspaceRoot);
+    const csvPaths = await writePlotGridCsvFiles(workspaceRoot, output);
+
+    const panel = vscode.window.createWebviewPanel(
+      "burbage.plotGridDashboard",
+      "Burbage: Plot Grid Dashboard",
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+
+    const state: PlotGridDashboardState = {
+      panel,
+      workspaceRoot,
+      data: {
+        eventRows: output.eventRows,
+        documentRows: output.documentRows,
+        sourceLabel: output.sourceLabel
+      },
+      watchers: []
+    };
+    plotGridDashboardState = state;
+
+    panel.webview.html = getPlotGridDashboardHtml(state.data);
+
+    for (const relativePath of ["Entities/events.yaml", "Entities/characters.yaml", "Entities/documents.yaml", "Manuscript/**"]) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceFolder, relativePath));
+      const schedule = () => schedulePlotGridDashboardRefresh(state);
+      watcher.onDidChange(schedule);
+      watcher.onDidCreate(schedule);
+      watcher.onDidDelete(schedule);
+      state.watchers.push(watcher);
+      context.subscriptions.push(watcher);
+    }
+
+    panel.onDidDispose(() => {
+      if (plotGridDashboardState === state) {
+        plotGridDashboardState = undefined;
+      }
+      disposePlotGridDashboardState(state);
+    });
+
+    const eventPathLabel = relativeToWorkspace(csvPaths.eventCsvPath, workspaceRoot);
+    const documentPathLabel = relativeToWorkspace(csvPaths.documentCsvPath, workspaceRoot);
     vscode.window.showInformationMessage(`Saved plot grid CSVs: ${eventPathLabel}, ${documentPathLabel}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(`Could not generate plot grid dashboard CSVs: ${message}`);
   }
+}
+
+function schedulePlotGridDashboardRefresh(state: PlotGridDashboardState): void {
+  if (plotGridDashboardState !== state) {
+    return;
+  }
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+  }
+  state.refreshTimer = setTimeout(() => {
+    void refreshPlotGridDashboard(state, false);
+  }, 180);
+}
+
+async function refreshPlotGridDashboard(state: PlotGridDashboardState, showErrorToUser: boolean): Promise<void> {
+  if (plotGridDashboardState !== state) {
+    return;
+  }
+  try {
+    const output = await loadPlotGridData(state.workspaceRoot);
+    state.data = {
+      eventRows: output.eventRows,
+      documentRows: output.documentRows,
+      sourceLabel: output.sourceLabel
+    };
+    await writePlotGridCsvFiles(state.workspaceRoot, output);
+    state.panel.webview.html = getPlotGridDashboardHtml(state.data);
+  } catch (error) {
+    if (!showErrorToUser) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not refresh plot grid dashboard: ${message}`);
+  }
+}
+
+function disposePlotGridDashboardState(state: PlotGridDashboardState): void {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = undefined;
+  }
+  for (const watcher of state.watchers) {
+    watcher.dispose();
+  }
+  state.watchers = [];
 }
 
 async function openCausalDiagramDashboard(context: vscode.ExtensionContext): Promise<void> {
@@ -1713,7 +1833,7 @@ async function loadPacingGraph(workspaceRoot: string): Promise<PacingGraphData> 
   );
 }
 
-async function generatePlotGridCsvs(workspaceRoot: string): Promise<{ eventCsvPath: string; documentCsvPath: string }> {
+async function loadPlotGridData(workspaceRoot: string): Promise<PlotGridBuildOutputs> {
   const sources = await resolveTimelineDataSources(workspaceRoot);
   const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
   const charactersPath = path.join(sources.entitiesDirPath, "characters.yaml");
@@ -1731,9 +1851,18 @@ async function generatePlotGridCsvs(workspaceRoot: string): Promise<{ eventCsvPa
     parseYaml(documentsRaw),
     manuscriptDocuments
   );
+  return {
+    ...csvOutputs,
+    sourceLabel: sources.sourceLabel
+  };
+}
 
-  const eventCsvPath = await writeDashboardSnapshotFile(workspaceRoot, "plot-grid-events.csv", csvOutputs.eventCsv);
-  const documentCsvPath = await writeDashboardSnapshotFile(workspaceRoot, "plot-grid-documents.csv", csvOutputs.documentCsv);
+async function writePlotGridCsvFiles(
+  workspaceRoot: string,
+  output: { eventCsv: string; documentCsv: string }
+): Promise<{ eventCsvPath: string; documentCsvPath: string }> {
+  const eventCsvPath = await writeDashboardSnapshotFile(workspaceRoot, "plot-grid-events.csv", output.eventCsv);
+  const documentCsvPath = await writeDashboardSnapshotFile(workspaceRoot, "plot-grid-documents.csv", output.documentCsv);
   return { eventCsvPath, documentCsvPath };
 }
 
@@ -2438,7 +2567,7 @@ function buildPlotGridCsvOutputs(
   charactersDocument: unknown,
   documentsDocument: unknown,
   manuscriptDocuments: string[]
-): { eventCsv: string; documentCsv: string } {
+): { eventCsv: string; documentCsv: string; eventRows: string[][]; documentRows: string[][] } {
   const eventsRecord = asRecord(eventsDocument);
   const charactersRecord = asRecord(charactersDocument);
   const documentsRecord = asRecord(documentsDocument);
@@ -2620,8 +2749,218 @@ function buildPlotGridCsvOutputs(
 
   return {
     eventCsv: toCsv(eventRows),
-    documentCsv: toCsv(documentRows)
+    documentCsv: toCsv(documentRows),
+    eventRows,
+    documentRows
   };
+}
+
+function getPlotGridDashboardHtml(data: PlotGridData): string {
+  const dataJson = JSON.stringify(data).replace(/</g, "\\u003c");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --dashboard-bg: var(--vscode-editor-background);
+      --dashboard-fg: var(--vscode-editor-foreground);
+      --dashboard-border: var(--vscode-panel-border);
+      --dashboard-widget-bg: var(--vscode-editorWidget-background);
+      --dashboard-description: var(--vscode-descriptionForeground);
+      --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--dashboard-bg);
+      color: var(--dashboard-fg);
+      font-family: var(--dashboard-font-family);
+      overflow: hidden;
+    }
+    .root {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 8px;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+    .mode-toggle {
+      display: inline-flex;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 8px;
+      width: fit-content;
+    }
+    .mode-button {
+      border: 1px solid var(--dashboard-border);
+      background: transparent;
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .mode-button.active {
+      background: rgba(120, 170, 220, 0.25);
+      border-color: rgba(120, 170, 220, 0.75);
+    }
+    .meta {
+      color: var(--dashboard-description);
+      font-size: 12px;
+    }
+    .table-wrap {
+      border: 1px solid var(--dashboard-border);
+      border-radius: 8px;
+      background: var(--dashboard-widget-bg);
+      overflow: auto;
+      min-height: 0;
+    }
+    table {
+      border-collapse: collapse;
+      table-layout: fixed;
+      width: max-content;
+      min-width: 100%;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--dashboard-widget-bg);
+    }
+    th, td {
+      border: 1px solid var(--dashboard-border);
+      padding: 4px 6px;
+      vertical-align: top;
+      max-width: 30ch;
+      min-width: 10ch;
+      width: 30ch;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    th.row-head {
+      position: sticky;
+      left: 0;
+      z-index: 3;
+      background: var(--dashboard-widget-bg);
+      width: 20ch;
+      min-width: 20ch;
+      max-width: 20ch;
+    }
+    thead tr:nth-child(2) th {
+      font-weight: 400;
+      color: var(--dashboard-description);
+    }
+  </style>
+</head>
+<body>
+  <div class="root">
+    <div class="mode-toggle" role="group" aria-label="Plot grid mode">
+      <button id="mode-event" class="mode-button" type="button">Event View</button>
+      <button id="mode-document" class="mode-button" type="button">Document View</button>
+    </div>
+    <div id="meta" class="meta"></div>
+    <div class="table-wrap">
+      <table id="grid-table"></table>
+    </div>
+  </div>
+  <script>
+    const data = ${dataJson};
+    const table = document.getElementById('grid-table');
+    const meta = document.getElementById('meta');
+    const modeEventButton = document.getElementById('mode-event');
+    const modeDocumentButton = document.getElementById('mode-document');
+    let mode = 'event';
+
+    function currentRows() {
+      return mode === 'document' ? data.documentRows : data.eventRows;
+    }
+
+    function updateModeButtons() {
+      modeEventButton.classList.toggle('active', mode === 'event');
+      modeDocumentButton.classList.toggle('active', mode === 'document');
+    }
+
+    function renderTable() {
+      const rows = currentRows();
+      table.innerHTML = '';
+      if (!Array.isArray(rows) || rows.length === 0) {
+        meta.textContent = 'No plot grid data available.';
+        return;
+      }
+
+      const cols = Array.isArray(rows[0]) ? rows[0].length : 0;
+      const modeLabel = mode === 'document' ? 'Document View' : 'Event View';
+      meta.textContent = modeLabel + ' · ' + Math.max(0, rows.length - 2) + ' characters · ' + Math.max(0, cols - 1) + ' columns';
+
+      const thead = document.createElement('thead');
+      for (let rowIndex = 0; rowIndex < Math.min(2, rows.length); rowIndex += 1) {
+        const tr = document.createElement('tr');
+        const row = rows[rowIndex];
+        for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
+          const th = document.createElement('th');
+          if (colIndex === 0) {
+            th.className = 'row-head';
+          }
+          th.textContent = row[colIndex] || '';
+          tr.appendChild(th);
+        }
+        thead.appendChild(tr);
+      }
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      for (let rowIndex = 2; rowIndex < rows.length; rowIndex += 1) {
+        const tr = document.createElement('tr');
+        const row = rows[rowIndex];
+        for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
+          if (colIndex === 0) {
+            const th = document.createElement('th');
+            th.className = 'row-head';
+            th.textContent = row[colIndex] || '';
+            tr.appendChild(th);
+          } else {
+            const td = document.createElement('td');
+            td.textContent = row[colIndex] || '';
+            tr.appendChild(td);
+          }
+        }
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+    }
+
+    function switchMode(nextMode) {
+      if (nextMode !== 'event' && nextMode !== 'document') {
+        return;
+      }
+      if (mode === nextMode) {
+        return;
+      }
+      mode = nextMode;
+      updateModeButtons();
+      renderTable();
+    }
+
+    modeEventButton.addEventListener('click', () => switchMode('event'));
+    modeDocumentButton.addEventListener('click', () => switchMode('document'));
+    updateModeButtons();
+    renderTable();
+  </script>
+</body>
+</html>`;
 }
 
 function getTimelineDashboardHtml(
