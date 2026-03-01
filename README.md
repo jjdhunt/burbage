@@ -22,6 +22,7 @@ Current MVP commands:
 - `Burbage: Open Causal Diagram Dashboard` (`burbage.openCausalDiagramDashboard`)
 - `Burbage: Open Vonnegut Diagram` (`burbage.openVonnegutDashboard`)
 - `Burbage: Open Pacing Dashboard` (`burbage.openPacingDashboard`)
+- `Burbage: Open Plot Grid Dashboard` (`burbage.openPlotGridDashboard`) - currently generates CSV outputs in `dashboards/`
 
 ## What `Burbage: Setup Project` does
 

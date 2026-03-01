@@ -93,6 +93,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("burbage.openPacingDashboard", async () => {
       await openPacingDashboard(context);
+    }),
+    vscode.commands.registerCommand("burbage.openPlotGridDashboard", async () => {
+      await openPlotGridDashboard(context);
     })
   );
 }
@@ -1292,6 +1295,24 @@ function disposePacingDashboardState(state: PacingDashboardState): void {
   state.watchers = [];
 }
 
+async function openPlotGridDashboard(_context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage("Open a folder/workspace before opening the plot grid dashboard.");
+      return;
+    }
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+    const output = await generatePlotGridCsvs(workspaceRoot);
+    const eventPathLabel = relativeToWorkspace(output.eventCsvPath, workspaceRoot);
+    const documentPathLabel = relativeToWorkspace(output.documentCsvPath, workspaceRoot);
+    vscode.window.showInformationMessage(`Saved plot grid CSVs: ${eventPathLabel}, ${documentPathLabel}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Could not generate plot grid dashboard CSVs: ${message}`);
+  }
+}
+
 async function openCausalDiagramDashboard(context: vscode.ExtensionContext): Promise<void> {
   try {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -1690,6 +1711,30 @@ async function loadPacingGraph(workspaceRoot: string): Promise<PacingGraphData> 
     manuscriptDocuments,
     sources.sourceLabel
   );
+}
+
+async function generatePlotGridCsvs(workspaceRoot: string): Promise<{ eventCsvPath: string; documentCsvPath: string }> {
+  const sources = await resolveTimelineDataSources(workspaceRoot);
+  const eventsPath = path.join(sources.entitiesDirPath, "events.yaml");
+  const charactersPath = path.join(sources.entitiesDirPath, "characters.yaml");
+  const documentsPath = path.join(sources.entitiesDirPath, "documents.yaml");
+  const [eventsRaw, charactersRaw, documentsRaw, manuscriptDocuments] = await Promise.all([
+    fs.readFile(eventsPath, "utf8"),
+    fs.readFile(charactersPath, "utf8"),
+    pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
+    listManuscriptDocuments(sources.manuscriptDirPath)
+  ]);
+
+  const csvOutputs = buildPlotGridCsvOutputs(
+    parseYaml(eventsRaw),
+    parseYaml(charactersRaw),
+    parseYaml(documentsRaw),
+    manuscriptDocuments
+  );
+
+  const eventCsvPath = await writeDashboardSnapshotFile(workspaceRoot, "plot-grid-events.csv", csvOutputs.eventCsv);
+  const documentCsvPath = await writeDashboardSnapshotFile(workspaceRoot, "plot-grid-documents.csv", csvOutputs.documentCsv);
+  return { eventCsvPath, documentCsvPath };
 }
 
 async function loadLocationGraph(workspaceRoot: string, mode: LocationDashboardMode): Promise<LocationGraphData> {
@@ -2385,6 +2430,197 @@ function buildPacingGraph(
     documents,
     smoothingWindow,
     sourceLabel
+  };
+}
+
+function buildPlotGridCsvOutputs(
+  eventsDocument: unknown,
+  charactersDocument: unknown,
+  documentsDocument: unknown,
+  manuscriptDocuments: string[]
+): { eventCsv: string; documentCsv: string } {
+  const eventsRecord = asRecord(eventsDocument);
+  const charactersRecord = asRecord(charactersDocument);
+  const documentsRecord = asRecord(documentsDocument);
+  const eventEntries = Object.entries(eventsRecord);
+  const characterNames = Object.keys(charactersRecord).sort((a, b) => a.localeCompare(b));
+
+  const parseOptionalNumber = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value.trim());
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const documentOrder: string[] = [];
+  const knownDocuments = new Set<string>();
+  for (const manuscriptDocument of manuscriptDocuments) {
+    const normalized = normalizeDocumentReference(manuscriptDocument);
+    if (!normalized || knownDocuments.has(normalized)) {
+      continue;
+    }
+    knownDocuments.add(normalized);
+    documentOrder.push(normalized);
+  }
+
+  const documentsByLower = new Map<string, string>();
+  const documentsByBasenameLower = new Map<string, string[]>();
+  const documentsByStemLower = new Map<string, string[]>();
+  for (const documentName of documentOrder) {
+    documentsByLower.set(documentName.toLowerCase(), documentName);
+    const basenameLower = path.posix.basename(documentName).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    basenameMatches.push(documentName);
+    documentsByBasenameLower.set(basenameLower, basenameMatches);
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    stemMatches.push(documentName);
+    documentsByStemLower.set(stemLower, stemMatches);
+  }
+
+  const resolveDocumentName = (documentReference: string): string | undefined => {
+    const normalizedReference = normalizeDocumentReference(documentReference);
+    if (!normalizedReference) {
+      return undefined;
+    }
+    const exact = documentsByLower.get(normalizedReference.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+    const basenameLower = path.posix.basename(normalizedReference).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    if (basenameMatches.length === 1) {
+      return basenameMatches[0];
+    }
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    if (stemMatches.length === 1) {
+      return stemMatches[0];
+    }
+    return undefined;
+  };
+
+  const documentSummaryByName = new Map<string, string>();
+  const documentIndexByName = new Map<string, number>();
+  for (const [documentRecordName, documentRecordValue] of Object.entries(documentsRecord)) {
+    const resolvedDocumentName = resolveDocumentName(documentRecordName);
+    if (!resolvedDocumentName) {
+      continue;
+    }
+    const documentRecord = asRecord(documentRecordValue);
+    documentSummaryByName.set(resolvedDocumentName, asOptionalString(documentRecord["summary"]) ?? "");
+    const parsedIndex = parseOptionalNumber(documentRecord["index"]);
+    if (typeof parsedIndex === "number") {
+      documentIndexByName.set(resolvedDocumentName, parsedIndex);
+    }
+  }
+
+  const sortedDocumentNames = documentOrder.slice().sort((a, b) => {
+    const indexA = documentIndexByName.get(a);
+    const indexB = documentIndexByName.get(b);
+    const hasA = Number.isFinite(indexA);
+    const hasB = Number.isFinite(indexB);
+    if (hasA && hasB && indexA !== indexB) {
+      return (indexA as number) - (indexB as number);
+    }
+    if (hasA && !hasB) {
+      return -1;
+    }
+    if (!hasA && hasB) {
+      return 1;
+    }
+    return a.localeCompare(b);
+  });
+
+  const eventColumns: Array<{
+    name: string;
+    summary: string;
+    mentions: string[];
+    roleByCharacter: Map<string, string>;
+  }> = [];
+
+  for (const [eventName, eventValue] of eventEntries) {
+    const event = asRecord(eventValue);
+    const mentions = toUniqueStrings(
+      asStringArray(event["mentions"])
+        .map((mention) => resolveDocumentName(mention))
+        .filter((mention): mention is string => typeof mention === "string")
+    );
+    const roleByCharacter = new Map<string, string>();
+    for (const party of parseEventParties(event["parties"])) {
+      const existing = roleByCharacter.get(party.name);
+      if (!existing) {
+        roleByCharacter.set(party.name, party.role);
+        continue;
+      }
+      const roleParts = existing.split(" | ");
+      if (!roleParts.includes(party.role)) {
+        roleByCharacter.set(party.name, `${existing} | ${party.role}`);
+      }
+    }
+    eventColumns.push({
+      name: eventName,
+      summary: asOptionalString(event["summary"]) ?? "",
+      mentions,
+      roleByCharacter
+    });
+  }
+
+  const eventsByDocument = new Map<string, typeof eventColumns>();
+  for (const documentName of sortedDocumentNames) {
+    eventsByDocument.set(documentName, []);
+  }
+  for (const eventColumn of eventColumns) {
+    for (const mention of eventColumn.mentions) {
+      const current = eventsByDocument.get(mention);
+      if (current) {
+        current.push(eventColumn);
+      }
+    }
+  }
+
+  const eventRows: string[][] = [
+    ["Character", ...eventColumns.map((column) => column.name)],
+    ["Description", ...eventColumns.map((column) => column.summary)]
+  ];
+  for (const characterName of characterNames) {
+    eventRows.push([
+      characterName,
+      ...eventColumns.map((column) => column.roleByCharacter.get(characterName) ?? "")
+    ]);
+  }
+
+  const documentRows: string[][] = [
+    ["Character", ...sortedDocumentNames],
+    ["Description", ...sortedDocumentNames.map((documentName) => documentSummaryByName.get(documentName) ?? "")]
+  ];
+  for (const characterName of characterNames) {
+    const row = [characterName];
+    for (const documentName of sortedDocumentNames) {
+      const events = eventsByDocument.get(documentName) ?? [];
+      const lines: string[] = [];
+      for (const eventColumn of events) {
+        const role = eventColumn.roleByCharacter.get(characterName);
+        if (!role) {
+          continue;
+        }
+        lines.push(`${eventColumn.name}: ${role}`);
+      }
+      row.push(lines.join("\n"));
+    }
+    documentRows.push(row);
+  }
+
+  return {
+    eventCsv: toCsv(eventRows),
+    documentCsv: toCsv(documentRows)
   };
 }
 
@@ -6413,11 +6649,15 @@ function asStringArray(value: unknown): string[] {
 }
 
 function parseEventPartyNames(value: unknown): string[] {
+  return toUniqueStrings(parseEventParties(value).map((party) => party.name));
+}
+
+function parseEventParties(value: unknown): Array<{ name: string; role: string }> {
   if (!Array.isArray(value)) {
     return [];
   }
 
-  const names: string[] = [];
+  const parties: Array<{ name: string; role: string }> = [];
   for (const item of value) {
     const partyRecord = asRecord(item);
     for (const [partyName, partyValue] of Object.entries(partyRecord)) {
@@ -6426,13 +6666,14 @@ function parseEventPartyNames(value: unknown): string[] {
         continue;
       }
       const partyDetails = asRecord(partyValue);
-      if (asOptionalString(partyDetails["role"])) {
-        names.push(normalizedPartyName);
+      const role = asOptionalString(partyDetails["role"]);
+      if (role) {
+        parties.push({ name: normalizedPartyName, role });
       }
     }
   }
 
-  return toUniqueStrings(names);
+  return parties;
 }
 
 function normalizeDocumentReference(reference: string): string | undefined {
@@ -6481,6 +6722,18 @@ async function collectManuscriptDocumentsRecursively(
 
 function toUniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+function toCsv(rows: string[][]): string {
+  return `${rows.map((row) => row.map((cell) => toCsvCell(cell)).join(",")).join("\n")}\n`;
+}
+
+function toCsvCell(value: string): string {
+  const normalized = value ?? "";
+  if (!/[",\n\r]/.test(normalized)) {
+    return normalized;
+  }
+  return `"${normalized.replace(/"/g, "\"\"")}"`;
 }
 
 function getConnectedEventStats(

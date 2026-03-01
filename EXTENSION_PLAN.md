@@ -28,6 +28,7 @@ Current command surface (`package.json`):
 - `burbage.openCausalDiagramDashboard`
 - `burbage.openVonnegutDashboard`
 - `burbage.openPacingDashboard`
+- `burbage.openPlotGridDashboard`
 
 Runtime dependency:
 - `yaml`
@@ -102,6 +103,15 @@ Also:
   - y-value is number of events mentioning each document
   - smooth moving average curve (window = 3)
 
+- Plot Grid Dashboard (CSV scaffold):
+  - opening dashboard command writes:
+    - `dashboards/plot-grid-events.csv`
+    - `dashboards/plot-grid-documents.csv`
+  - rows: characters
+  - columns: events (events CSV) or documents (documents CSV)
+  - header row for event/document names and subheader row for summaries
+  - cell values from `events.yaml.parties` role mappings
+
 All dashboards support snapshot export and watcher-driven refresh.
 
 ### 4. Codex Integration
@@ -117,13 +127,7 @@ All dashboards support snapshot export and watcher-driven refresh.
 
 ### Priority Dashboard TODOs
 
-1. Tables: Plot Grid
-- Matrix view:
-  - rows: characters
-  - columns: events
-  - cell: character role in event
-
-2. Tables: Chapter Summary Timeline
+1. Tables: Chapter Summary Timeline
 - Row-based chapter/document summary table.
 - Each row is one chapter/document summary.
 
