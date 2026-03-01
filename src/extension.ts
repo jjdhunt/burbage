@@ -101,7 +101,8 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // No background resources yet.
+  diagnosticsOutputChannel?.dispose();
+  diagnosticsOutputChannel = undefined;
 }
 
 type CharacterGraphNode = {
@@ -336,6 +337,8 @@ let timelineDashboardState: TimelineDashboardState | undefined;
 let vonnegutDashboardState: VonnegutDashboardState | undefined;
 let pacingDashboardState: PacingDashboardState | undefined;
 let plotGridDashboardState: PlotGridDashboardState | undefined;
+let diagnosticsOutputChannel: vscode.OutputChannel | undefined;
+const lastDiagnosticsSignatureByWorkspace = new Map<string, string>();
 const locationDashboardStates: Record<LocationDashboardMode, LocationDashboardState | undefined> = {
   hierarchy: undefined,
   geography: undefined
@@ -1808,9 +1811,18 @@ async function loadVonnegutGraph(workspaceRoot: string): Promise<VonnegutGraphDa
     pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
+  const eventsDocument = parseYaml(eventsRaw);
+  const documentsDocument = parseYaml(documentsRaw);
+  reportDocumentResolutionDiagnostics({
+    workspaceRoot,
+    dashboardLabel: "Vonnegut Dashboard",
+    eventsDocument,
+    documentsDocument,
+    manuscriptDocuments
+  });
   return buildVonnegutGraph(
-    parseYaml(eventsRaw),
-    parseYaml(documentsRaw),
+    eventsDocument,
+    documentsDocument,
     manuscriptDocuments,
     sources.sourceLabel
   );
@@ -1825,9 +1837,18 @@ async function loadPacingGraph(workspaceRoot: string): Promise<PacingGraphData> 
     pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
+  const eventsDocument = parseYaml(eventsRaw);
+  const documentsDocument = parseYaml(documentsRaw);
+  reportDocumentResolutionDiagnostics({
+    workspaceRoot,
+    dashboardLabel: "Pacing Dashboard",
+    eventsDocument,
+    documentsDocument,
+    manuscriptDocuments
+  });
   return buildPacingGraph(
-    parseYaml(eventsRaw),
-    parseYaml(documentsRaw),
+    eventsDocument,
+    documentsDocument,
     manuscriptDocuments,
     sources.sourceLabel
   );
@@ -1844,11 +1865,21 @@ async function loadPlotGridData(workspaceRoot: string): Promise<PlotGridBuildOut
     pathExists(documentsPath).then((exists) => (exists ? fs.readFile(documentsPath, "utf8") : "{}\n")),
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
+  const eventsDocument = parseYaml(eventsRaw);
+  const charactersDocument = parseYaml(charactersRaw);
+  const documentsDocument = parseYaml(documentsRaw);
+  reportDocumentResolutionDiagnostics({
+    workspaceRoot,
+    dashboardLabel: "Plot Grid Dashboard",
+    eventsDocument,
+    documentsDocument,
+    manuscriptDocuments
+  });
 
   const csvOutputs = buildPlotGridCsvOutputs(
-    parseYaml(eventsRaw),
-    parseYaml(charactersRaw),
-    parseYaml(documentsRaw),
+    eventsDocument,
+    charactersDocument,
+    documentsDocument,
     manuscriptDocuments
   );
   return {
@@ -1898,11 +1929,23 @@ async function loadTimelineGraph(workspaceRoot: string): Promise<TimelineGraphDa
     listManuscriptDocuments(sources.manuscriptDirPath)
   ]);
 
+  const eventsDocument = parseYaml(eventsRaw);
+  const charactersDocument = parseYaml(charactersRaw);
+  const locationsDocument = parseYaml(locationsRaw);
+  const documentsDocument = parseYaml(documentsRaw);
+  reportDocumentResolutionDiagnostics({
+    workspaceRoot,
+    dashboardLabel: "Timeline Dashboard",
+    eventsDocument,
+    documentsDocument,
+    manuscriptDocuments
+  });
+
   return buildTimelineGraph(
-    parseYaml(eventsRaw),
-    parseYaml(charactersRaw),
-    parseYaml(locationsRaw),
-    parseYaml(documentsRaw),
+    eventsDocument,
+    charactersDocument,
+    locationsDocument,
+    documentsDocument,
     manuscriptDocuments,
     sources.sourceLabel
   );
@@ -1977,6 +2020,9 @@ function buildTimelineGraph(
   const documentsByLower = new Map<string, string>();
   const documentsByBasenameLower = new Map<string, string[]>();
   const documentsByStemLower = new Map<string, string[]>();
+  const documentsByCanonical = new Map<string, string[]>();
+  const documentsByBasenameCanonical = new Map<string, string[]>();
+  const documentsByActSceneSignature = new Map<string, string[]>();
   for (const documentName of documentOrder) {
     documentsByLower.set(documentName.toLowerCase(), documentName);
 
@@ -1989,6 +2035,27 @@ function buildTimelineGraph(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     stemMatches.push(documentName);
     documentsByStemLower.set(stemLower, stemMatches);
+
+    const canonical = canonicalizeDocumentLookupKey(documentName);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      canonicalMatches.push(documentName);
+      documentsByCanonical.set(canonical, canonicalMatches);
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(documentName));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      basenameCanonicalMatches.push(documentName);
+      documentsByBasenameCanonical.set(basenameCanonical, basenameCanonicalMatches);
+    }
+
+    const actSceneSignature = extractActSceneSignature(documentName);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      signatureMatches.push(documentName);
+      documentsByActSceneSignature.set(actSceneSignature, signatureMatches);
+    }
   }
 
   const resolveEventMentionDocument = (mentionReference: string): string | undefined => {
@@ -2014,6 +2081,30 @@ function buildTimelineGraph(
       return stemMatches[0];
     }
 
+    const canonical = canonicalizeDocumentLookupKey(normalizedMention);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      if (canonicalMatches.length === 1) {
+        return canonicalMatches[0];
+      }
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(normalizedMention));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      if (basenameCanonicalMatches.length === 1) {
+        return basenameCanonicalMatches[0];
+      }
+    }
+
+    const actSceneSignature = extractActSceneSignature(normalizedMention);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      if (signatureMatches.length === 1) {
+        return signatureMatches[0];
+      }
+    }
+
     return undefined;
   };
   const resolveDocumentRecordName = (documentReference: string): string | undefined => {
@@ -2037,6 +2128,30 @@ function buildTimelineGraph(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     if (stemMatches.length === 1) {
       return stemMatches[0];
+    }
+
+    const canonical = canonicalizeDocumentLookupKey(normalizedDocumentReference);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      if (canonicalMatches.length === 1) {
+        return canonicalMatches[0];
+      }
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(normalizedDocumentReference));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      if (basenameCanonicalMatches.length === 1) {
+        return basenameCanonicalMatches[0];
+      }
+    }
+
+    const actSceneSignature = extractActSceneSignature(normalizedDocumentReference);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      if (signatureMatches.length === 1) {
+        return signatureMatches[0];
+      }
     }
 
     return undefined;
@@ -2294,6 +2409,9 @@ function buildVonnegutGraph(
   const documentsByLower = new Map<string, string>();
   const documentsByBasenameLower = new Map<string, string[]>();
   const documentsByStemLower = new Map<string, string[]>();
+  const documentsByCanonical = new Map<string, string[]>();
+  const documentsByBasenameCanonical = new Map<string, string[]>();
+  const documentsByActSceneSignature = new Map<string, string[]>();
   for (const documentName of documentOrder) {
     documentsByLower.set(documentName.toLowerCase(), documentName);
 
@@ -2306,6 +2424,27 @@ function buildVonnegutGraph(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     stemMatches.push(documentName);
     documentsByStemLower.set(stemLower, stemMatches);
+
+    const canonical = canonicalizeDocumentLookupKey(documentName);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      canonicalMatches.push(documentName);
+      documentsByCanonical.set(canonical, canonicalMatches);
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(documentName));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      basenameCanonicalMatches.push(documentName);
+      documentsByBasenameCanonical.set(basenameCanonical, basenameCanonicalMatches);
+    }
+
+    const actSceneSignature = extractActSceneSignature(documentName);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      signatureMatches.push(documentName);
+      documentsByActSceneSignature.set(actSceneSignature, signatureMatches);
+    }
   }
 
   const resolveDocumentName = (documentReference: string): string | undefined => {
@@ -2328,6 +2467,30 @@ function buildVonnegutGraph(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     if (stemMatches.length === 1) {
       return stemMatches[0];
+    }
+
+    const canonical = canonicalizeDocumentLookupKey(normalizedReference);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      if (canonicalMatches.length === 1) {
+        return canonicalMatches[0];
+      }
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(normalizedReference));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      if (basenameCanonicalMatches.length === 1) {
+        return basenameCanonicalMatches[0];
+      }
+    }
+
+    const actSceneSignature = extractActSceneSignature(normalizedReference);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      if (signatureMatches.length === 1) {
+        return signatureMatches[0];
+      }
     }
 
     return undefined;
@@ -2463,6 +2626,9 @@ function buildPacingGraph(
   const documentsByLower = new Map<string, string>();
   const documentsByBasenameLower = new Map<string, string[]>();
   const documentsByStemLower = new Map<string, string[]>();
+  const documentsByCanonical = new Map<string, string[]>();
+  const documentsByBasenameCanonical = new Map<string, string[]>();
+  const documentsByActSceneSignature = new Map<string, string[]>();
   for (const documentName of documentOrder) {
     documentsByLower.set(documentName.toLowerCase(), documentName);
     const basenameLower = path.posix.basename(documentName).toLowerCase();
@@ -2474,6 +2640,27 @@ function buildPacingGraph(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     stemMatches.push(documentName);
     documentsByStemLower.set(stemLower, stemMatches);
+
+    const canonical = canonicalizeDocumentLookupKey(documentName);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      canonicalMatches.push(documentName);
+      documentsByCanonical.set(canonical, canonicalMatches);
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(documentName));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      basenameCanonicalMatches.push(documentName);
+      documentsByBasenameCanonical.set(basenameCanonical, basenameCanonicalMatches);
+    }
+
+    const actSceneSignature = extractActSceneSignature(documentName);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      signatureMatches.push(documentName);
+      documentsByActSceneSignature.set(actSceneSignature, signatureMatches);
+    }
   }
 
   const resolveDocumentName = (documentReference: string): string | undefined => {
@@ -2494,6 +2681,29 @@ function buildPacingGraph(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     if (stemMatches.length === 1) {
       return stemMatches[0];
+    }
+
+    const canonical = canonicalizeDocumentLookupKey(normalizedReference);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      if (canonicalMatches.length === 1) {
+        return canonicalMatches[0];
+      }
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(normalizedReference));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      if (basenameCanonicalMatches.length === 1) {
+        return basenameCanonicalMatches[0];
+      }
+    }
+    const actSceneSignature = extractActSceneSignature(normalizedReference);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      if (signatureMatches.length === 1) {
+        return signatureMatches[0];
+      }
     }
     return undefined;
   };
@@ -2601,6 +2811,9 @@ function buildPlotGridCsvOutputs(
   const documentsByLower = new Map<string, string>();
   const documentsByBasenameLower = new Map<string, string[]>();
   const documentsByStemLower = new Map<string, string[]>();
+  const documentsByCanonical = new Map<string, string[]>();
+  const documentsByBasenameCanonical = new Map<string, string[]>();
+  const documentsByActSceneSignature = new Map<string, string[]>();
   for (const documentName of documentOrder) {
     documentsByLower.set(documentName.toLowerCase(), documentName);
     const basenameLower = path.posix.basename(documentName).toLowerCase();
@@ -2612,6 +2825,27 @@ function buildPlotGridCsvOutputs(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     stemMatches.push(documentName);
     documentsByStemLower.set(stemLower, stemMatches);
+
+    const canonical = canonicalizeDocumentLookupKey(documentName);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      canonicalMatches.push(documentName);
+      documentsByCanonical.set(canonical, canonicalMatches);
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(documentName));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      basenameCanonicalMatches.push(documentName);
+      documentsByBasenameCanonical.set(basenameCanonical, basenameCanonicalMatches);
+    }
+
+    const actSceneSignature = extractActSceneSignature(documentName);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      signatureMatches.push(documentName);
+      documentsByActSceneSignature.set(actSceneSignature, signatureMatches);
+    }
   }
 
   const resolveDocumentName = (documentReference: string): string | undefined => {
@@ -2632,6 +2866,29 @@ function buildPlotGridCsvOutputs(
     const stemMatches = documentsByStemLower.get(stemLower) ?? [];
     if (stemMatches.length === 1) {
       return stemMatches[0];
+    }
+
+    const canonical = canonicalizeDocumentLookupKey(normalizedReference);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      if (canonicalMatches.length === 1) {
+        return canonicalMatches[0];
+      }
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(normalizedReference));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      if (basenameCanonicalMatches.length === 1) {
+        return basenameCanonicalMatches[0];
+      }
+    }
+    const actSceneSignature = extractActSceneSignature(normalizedReference);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      if (signatureMatches.length === 1) {
+        return signatureMatches[0];
+      }
     }
     return undefined;
   };
@@ -6985,6 +7242,261 @@ function asStringArray(value: unknown): string[] {
   return value
     .map((item) => asOptionalString(item))
     .filter((item): item is string => typeof item === "string");
+}
+
+function reportDocumentResolutionDiagnostics(args: {
+  workspaceRoot: string;
+  dashboardLabel: string;
+  eventsDocument: unknown;
+  documentsDocument: unknown;
+  manuscriptDocuments: string[];
+}): void {
+  const unresolved = collectUnresolvedDocumentReferences(
+    args.eventsDocument,
+    args.documentsDocument,
+    args.manuscriptDocuments
+  );
+  const signature = unresolved.join("\n");
+  const signatureKey = `${args.workspaceRoot}::${args.dashboardLabel}`;
+  if (lastDiagnosticsSignatureByWorkspace.get(signatureKey) === signature) {
+    return;
+  }
+  lastDiagnosticsSignatureByWorkspace.set(signatureKey, signature);
+  if (unresolved.length === 0) {
+    return;
+  }
+
+  const output = getDiagnosticsOutputChannel();
+  const timestamp = new Date().toISOString();
+  output.appendLine(`[${timestamp}] ${args.dashboardLabel} unresolved document references (${unresolved.length})`);
+  for (const line of unresolved) {
+    output.appendLine(`  - ${line}`);
+  }
+  output.appendLine("");
+
+  void vscode.window
+    .showWarningMessage(
+      `Burbage: ${args.dashboardLabel} found ${unresolved.length} unresolved document reference(s).`,
+      "Open Diagnostics"
+    )
+    .then((selection) => {
+      if (selection === "Open Diagnostics") {
+        output.show(true);
+      }
+    });
+}
+
+function getDiagnosticsOutputChannel(): vscode.OutputChannel {
+  if (!diagnosticsOutputChannel) {
+    diagnosticsOutputChannel = vscode.window.createOutputChannel("Burbage Diagnostics");
+  }
+  return diagnosticsOutputChannel;
+}
+
+function collectUnresolvedDocumentReferences(
+  eventsDocument: unknown,
+  documentsDocument: unknown,
+  manuscriptDocuments: string[]
+): string[] {
+  const unresolved = new Set<string>();
+  const resolveDocument = createDocumentReferenceResolver(manuscriptDocuments);
+
+  const documentsRecord = asRecord(documentsDocument);
+  for (const documentKey of Object.keys(documentsRecord)) {
+    if (!resolveDocument(documentKey)) {
+      unresolved.add(`documents.yaml key: ${documentKey}`);
+    }
+  }
+
+  const eventsRecord = asRecord(eventsDocument);
+  for (const [eventName, eventValue] of Object.entries(eventsRecord)) {
+    const event = asRecord(eventValue);
+    for (const mention of asStringArray(event["mentions"])) {
+      if (!resolveDocument(mention)) {
+        unresolved.add(`events.yaml mentions (${eventName}): ${mention}`);
+      }
+    }
+  }
+
+  return Array.from(unresolved).sort((a, b) => a.localeCompare(b));
+}
+
+function createDocumentReferenceResolver(manuscriptDocuments: string[]): (reference: string) => string | undefined {
+  const documentOrder: string[] = [];
+  const knownDocuments = new Set<string>();
+  for (const manuscriptDocument of manuscriptDocuments) {
+    const normalized = normalizeDocumentReference(manuscriptDocument);
+    if (!normalized || knownDocuments.has(normalized)) {
+      continue;
+    }
+    knownDocuments.add(normalized);
+    documentOrder.push(normalized);
+  }
+
+  const documentsByLower = new Map<string, string>();
+  const documentsByBasenameLower = new Map<string, string[]>();
+  const documentsByStemLower = new Map<string, string[]>();
+  const documentsByCanonical = new Map<string, string[]>();
+  const documentsByBasenameCanonical = new Map<string, string[]>();
+  const documentsByActSceneSignature = new Map<string, string[]>();
+
+  for (const documentName of documentOrder) {
+    documentsByLower.set(documentName.toLowerCase(), documentName);
+
+    const basenameLower = path.posix.basename(documentName).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    basenameMatches.push(documentName);
+    documentsByBasenameLower.set(basenameLower, basenameMatches);
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    stemMatches.push(documentName);
+    documentsByStemLower.set(stemLower, stemMatches);
+
+    const canonical = canonicalizeDocumentLookupKey(documentName);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      canonicalMatches.push(documentName);
+      documentsByCanonical.set(canonical, canonicalMatches);
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(documentName));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      basenameCanonicalMatches.push(documentName);
+      documentsByBasenameCanonical.set(basenameCanonical, basenameCanonicalMatches);
+    }
+
+    const actSceneSignature = extractActSceneSignature(documentName);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      signatureMatches.push(documentName);
+      documentsByActSceneSignature.set(actSceneSignature, signatureMatches);
+    }
+  }
+
+  return (reference: string): string | undefined => {
+    const normalizedReference = normalizeDocumentReference(reference);
+    if (!normalizedReference) {
+      return undefined;
+    }
+
+    const exact = documentsByLower.get(normalizedReference.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+
+    const basenameLower = path.posix.basename(normalizedReference).toLowerCase();
+    const basenameMatches = documentsByBasenameLower.get(basenameLower) ?? [];
+    if (basenameMatches.length === 1) {
+      return basenameMatches[0];
+    }
+
+    const stemLower = basenameLower.replace(/\.[^.]+$/, "");
+    const stemMatches = documentsByStemLower.get(stemLower) ?? [];
+    if (stemMatches.length === 1) {
+      return stemMatches[0];
+    }
+
+    const canonical = canonicalizeDocumentLookupKey(normalizedReference);
+    if (canonical) {
+      const canonicalMatches = documentsByCanonical.get(canonical) ?? [];
+      if (canonicalMatches.length === 1) {
+        return canonicalMatches[0];
+      }
+    }
+
+    const basenameCanonical = canonicalizeDocumentLookupKey(path.posix.basename(normalizedReference));
+    if (basenameCanonical) {
+      const basenameCanonicalMatches = documentsByBasenameCanonical.get(basenameCanonical) ?? [];
+      if (basenameCanonicalMatches.length === 1) {
+        return basenameCanonicalMatches[0];
+      }
+    }
+
+    const actSceneSignature = extractActSceneSignature(normalizedReference);
+    if (actSceneSignature) {
+      const signatureMatches = documentsByActSceneSignature.get(actSceneSignature) ?? [];
+      if (signatureMatches.length === 1) {
+        return signatureMatches[0];
+      }
+    }
+
+    return undefined;
+  };
+}
+
+function canonicalizeDocumentLookupKey(reference: string): string | undefined {
+  const normalized = normalizeDocumentReference(reference);
+  if (!normalized) {
+    return undefined;
+  }
+
+  const lowered = normalized
+    .normalize("NFKD")
+    .replace(/[\u2018\u2019]/g, "'")
+    .toLowerCase();
+  const parts = lowered.split("/");
+  const canonicalParts: string[] = [];
+
+  for (const part of parts) {
+    const stem = part.replace(/\.[^.]+$/, "");
+    const rawTokens = stem
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token.length > 0);
+    if (rawTokens.length === 0) {
+      continue;
+    }
+
+    const tokens = rawTokens.map((token) => {
+      const maybeRoman = romanNumeralToInt(token);
+      return typeof maybeRoman === "number" ? String(maybeRoman) : token;
+    });
+    canonicalParts.push(tokens.join(" "));
+  }
+
+  const canonical = canonicalParts.join(" / ").trim();
+  return canonical || undefined;
+}
+
+function romanNumeralToInt(token: string): number | undefined {
+  if (!/^[ivxlcdm]+$/.test(token)) {
+    return undefined;
+  }
+  if (!/^(m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3}))$/.test(token)) {
+    return undefined;
+  }
+
+  const values: Record<string, number> = {
+    i: 1,
+    v: 5,
+    x: 10,
+    l: 50,
+    c: 100,
+    d: 500,
+    m: 1000
+  };
+  let total = 0;
+  for (let index = 0; index < token.length; index += 1) {
+    const current = values[token[index]];
+    const next = index + 1 < token.length ? values[token[index + 1]] : 0;
+    total += current < next ? -current : current;
+  }
+  return total > 0 ? total : undefined;
+}
+
+function extractActSceneSignature(reference: string): string | undefined {
+  const canonical = canonicalizeDocumentLookupKey(reference);
+  if (!canonical) {
+    return undefined;
+  }
+  const match = canonical.match(/\bact\s+(\d+)\b[\s/-]*\bscene\s+(\d+)\b/);
+  if (!match) {
+    return undefined;
+  }
+  return `act:${match[1]}|scene:${match[2]}`;
 }
 
 function parseEventPartyNames(value: unknown): string[] {
