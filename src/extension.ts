@@ -5294,7 +5294,7 @@ function getCausalDashboardHtml(
       const maxRows = Math.max(1, maxStepRank - minStepRank + 2);
       const availableHeight = Math.max(140, height - 40);
       const computedDy = Math.floor(availableHeight / maxRows);
-      currentStepDy = Math.max(minimumStepDy, computedDy);
+      currentStepDy = Math.max(1, Math.floor(Math.max(minimumStepDy, computedDy) * 0.8));
       for (const nodeDatum of graph.nodes) {
         const normalizedRank = (stepRankByNodeId.get(nodeDatum.id) || 0) - minStepRank;
         nodeDatum.targetY = (normalizedRank + 1) * currentStepDy;
@@ -5449,6 +5449,49 @@ function getCausalDashboardHtml(
       };
     }
 
+    function causalLinkPath(linkDatum) {
+      const sourceNode = typeof linkDatum.source === 'string' ? nodeById.get(linkDatum.source) : linkDatum.source;
+      const targetNode = typeof linkDatum.target === 'string' ? nodeById.get(linkDatum.target) : linkDatum.target;
+      const trimmed = trimDirectedLink(linkDatum);
+      if (!isStepLayoutMode()) {
+        return 'M' + trimmed.x1 + ',' + trimmed.y1 + 'L' + trimmed.x2 + ',' + trimmed.y2;
+      }
+
+      const targetCenterX = targetNode ? (targetNode.x || 0) : trimmed.x2;
+      const sourceY = sourceNode ? (sourceNode.y || 0) : trimmed.y1;
+      const targetY = targetNode ? (targetNode.y || 0) : trimmed.y2;
+      const verticalDirection = Math.sign(targetY - sourceY) || Math.sign(trimmed.y2 - trimmed.y1) || 1;
+      const endX = targetCenterX;
+      const endY = targetY - verticalDirection * (nodeRadius + 2);
+      const dx = endX - trimmed.x1;
+      const dy = endY - trimmed.y1;
+      const absDy = Math.abs(dy);
+      const length = Math.hypot(dx, dy);
+      if (!Number.isFinite(length) || length < 0.001 || absDy < 0.001) {
+        return 'M' + trimmed.x1 + ',' + trimmed.y1 + 'L' + endX + ',' + endY;
+      }
+
+      const unitX = dx / length;
+      const unitY = dy / length;
+      const directionY = Math.sign(dy);
+      const startHandle = Math.max(16, Math.min(180, length * 0.28));
+      const endHandle = Math.max(18, Math.min(170, absDy * 0.7));
+      const directAngle = Math.atan2(unitY, unitX);
+      const horizontalAngle = dx >= 0 ? 0 : Math.PI;
+      const signedDelta = Math.atan2(Math.sin(directAngle - horizontalAngle), Math.cos(directAngle - horizontalAngle));
+      const halfAngle = horizontalAngle + signedDelta * 0.5;
+      const halfUnitX = Math.cos(halfAngle);
+      const halfUnitY = Math.sin(halfAngle);
+      const control1X = trimmed.x1 + halfUnitX * startHandle;
+      const control1Y = trimmed.y1 + halfUnitY * startHandle;
+      const control2X = endX;
+      const control2Y = endY - directionY * endHandle;
+      return (
+        'M' + trimmed.x1 + ',' + trimmed.y1 +
+        'C' + control1X + ',' + control1Y + ' ' + control2X + ',' + control2Y + ' ' + endX + ',' + endY
+      );
+    }
+
     function renderLegend() {
       legend.innerHTML = '';
       const title = document.createElement('div');
@@ -5482,23 +5525,37 @@ function getCausalDashboardHtml(
     renderLegend();
 
     const markerId = 'causal-link-arrow';
+    const dimmedMarkerId = 'causal-link-arrow-dimmed';
     const defs = svg.append('defs');
     defs.append('marker')
       .attr('id', markerId)
       .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 9.4)
+      .attr('refX', 7.5)
       .attr('refY', 0)
-      .attr('markerWidth', 7)
-      .attr('markerHeight', 7)
+      .attr('markerWidth', 3.5)
+      .attr('markerHeight', 3.5)
       .attr('orient', 'auto')
       .append('path')
       .attr('d', 'M0,-5L10,0L0,5')
       .attr('fill', 'context-stroke');
+    defs.append('marker')
+      .attr('id', dimmedMarkerId)
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 7.5)
+      .attr('refY', 0)
+      .attr('markerWidth', 3.5)
+      .attr('markerHeight', 3.5)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', 'context-stroke')
+      .attr('fill-opacity', dimmedLinkOpacity);
 
     const container = svg.append('g');
     const linkLayer = container.append('g').attr('fill', 'none');
     const nodeLayer = container.append('g');
     const labelLayer = container.append('g');
+    const highlightedLinkLayer = container.append('g').attr('fill', 'none').attr('pointer-events', 'none');
 
     const zoom = d3.zoom()
       .scaleExtent([0.2, 3.5])
@@ -5510,9 +5567,9 @@ function getCausalDashboardHtml(
     svg.call(zoom);
 
     const link = linkLayer
-      .selectAll('line')
+      .selectAll('path')
       .data(graph.links, (d) => d.id)
-      .join('line')
+      .join('path')
       .attr('stroke', (d) => linkStrokeColor(d))
       .attr('stroke-opacity', defaultLinkOpacity)
       .attr('stroke-width', defaultLinkWidth)
@@ -5565,24 +5622,66 @@ function getCausalDashboardHtml(
       .attr('pointer-events', 'none')
       .text((d) => d.name);
 
+    function renderHighlightedLinkOverlay(highlightedLinkIds) {
+      const highlightedLinks = graph.links.filter((linkDatum) => highlightedLinkIds.has(linkDatum.id));
+      highlightedLinkLayer
+        .selectAll('path')
+        .data(highlightedLinks, (d) => d.id)
+        .join('path')
+        .attr('stroke', (d) => linkStrokeColor(d))
+        .attr('stroke-opacity', highlightedLinkOpacity)
+        .attr('stroke-width', highlightedLinkWidth)
+        .attr('marker-end', 'url(#' + markerId + ')')
+        .attr('d', (d) => causalLinkPath(d));
+    }
+
     function resetCausalLinkHighlight() {
       link
+        .attr('marker-end', 'url(#' + markerId + ')')
         .attr('stroke-opacity', defaultLinkOpacity)
         .attr('stroke-width', defaultLinkWidth);
+      highlightedLinkLayer.selectAll('path').remove();
+      node.attr('opacity', 1);
+      nodeLabel.attr('opacity', 1);
     }
 
     function highlightCausalLinksForNode(nodeId) {
+      const highlightedLinkIds = new Set();
+      const visitedUpstreamNodes = new Set([nodeId]);
+      const highlightedNodeIds = new Set([nodeId]);
+
+      const collectUpstream = (currentNodeId) => {
+        const nodeLinks = linkIdByNodeId.get(currentNodeId) || { incoming: [], outgoing: [] };
+        for (const linkDatum of nodeLinks.incoming) {
+          highlightedLinkIds.add(linkDatum.id);
+          const sourceId = linkEndId(linkDatum.source);
+          if (visitedUpstreamNodes.has(sourceId)) {
+            continue;
+          }
+          visitedUpstreamNodes.add(sourceId);
+          highlightedNodeIds.add(sourceId);
+          collectUpstream(sourceId);
+        }
+      };
+
+      collectUpstream(nodeId);
+      const nodeLinks = linkIdByNodeId.get(nodeId) || { incoming: [], outgoing: [] };
+      for (const linkDatum of nodeLinks.outgoing) {
+        highlightedLinkIds.add(linkDatum.id);
+        highlightedNodeIds.add(linkEndId(linkDatum.target));
+      }
+
       link
+        .attr('marker-end', (d) => (highlightedLinkIds.has(d.id) ? 'url(#' + markerId + ')' : 'url(#' + dimmedMarkerId + ')'))
         .attr('stroke-opacity', (d) => {
-          const sourceId = linkEndId(d.source);
-          const targetId = linkEndId(d.target);
-          return sourceId === nodeId || targetId === nodeId ? highlightedLinkOpacity : dimmedLinkOpacity;
+          return highlightedLinkIds.has(d.id) ? highlightedLinkOpacity : dimmedLinkOpacity;
         })
         .attr('stroke-width', (d) => {
-          const sourceId = linkEndId(d.source);
-          const targetId = linkEndId(d.target);
-          return sourceId === nodeId || targetId === nodeId ? highlightedLinkWidth : dimmedLinkWidth;
+          return highlightedLinkIds.has(d.id) ? highlightedLinkWidth : dimmedLinkWidth;
         });
+      renderHighlightedLinkOverlay(highlightedLinkIds);
+      node.attr('opacity', (d) => (highlightedNodeIds.has(d.id) ? 1 : 0.22));
+      nodeLabel.attr('opacity', (d) => (highlightedNodeIds.has(d.id) ? 1 : 0.22));
     }
 
     const linkForce = d3.forceLink(graph.links).id((d) => d.id);
@@ -5698,10 +5797,10 @@ function getCausalDashboardHtml(
         enforceMinRowSpacing(rowMinSpacingPx);
 
         link
-          .attr('x1', (d) => trimDirectedLink(d).x1)
-          .attr('y1', (d) => trimDirectedLink(d).y1)
-          .attr('x2', (d) => trimDirectedLink(d).x2)
-          .attr('y2', (d) => trimDirectedLink(d).y2);
+          .attr('d', (d) => causalLinkPath(d));
+        highlightedLinkLayer
+          .selectAll('path')
+          .attr('d', (d) => causalLinkPath(d));
 
         node
           .attr('cx', (d) => d.x)
