@@ -219,6 +219,7 @@ type CausalGraphData = {
 };
 
 type LocationDashboardMode = "hierarchy" | "geography";
+type CausalDashboardMode = "free" | "step";
 type TimelineDashboardMode = "event" | "document";
 type VonnegutDashboardMode = "event" | "document";
 
@@ -244,6 +245,7 @@ type CausalDashboardState = {
   panel: vscode.WebviewPanel;
   workspaceRoot: string;
   graph: CausalGraphData;
+  mode: CausalDashboardMode;
   watchers: vscode.FileSystemWatcher[];
   refreshTimer?: NodeJS.Timeout;
 };
@@ -1472,13 +1474,18 @@ async function openCausalDiagramDashboard(context: vscode.ExtensionContext): Pro
       panel,
       workspaceRoot,
       graph,
+      mode: "free",
       watchers: []
     };
     causalDashboardState = state;
 
-    panel.webview.html = getCausalDashboardHtml(graph);
+    panel.webview.html = getCausalDashboardHtml(graph, state.mode);
 
     const messageDisposable = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (isCausalModeChangedMessage(message)) {
+        state.mode = message.mode;
+        return;
+      }
       if (!isSaveDashboardMessage(message)) {
         return;
       }
@@ -1527,7 +1534,7 @@ async function refreshCausalDashboard(state: CausalDashboardState, showErrorToUs
   try {
     const graph = await loadCausalGraph(state.workspaceRoot);
     state.graph = graph;
-    state.panel.webview.html = getCausalDashboardHtml(graph);
+    state.panel.webview.html = getCausalDashboardHtml(graph, state.mode);
   } catch (error) {
     if (!showErrorToUser) {
       return;
@@ -1724,7 +1731,7 @@ async function saveTimelineDashboardSnapshot(state: TimelineDashboardState): Pro
 
 async function saveCausalDashboardSnapshot(state: CausalDashboardState): Promise<void> {
   try {
-    const html = getCausalDashboardHtml(state.graph, {
+    const html = getCausalDashboardHtml(state.graph, state.mode, {
       includeSaveButton: false,
       standaloneDarkMode: true
     });
@@ -4991,8 +4998,13 @@ function buildCausalGraph(eventsDocument: unknown, sourceLabel: string): CausalG
   return { nodes, links, sourceLabel };
 }
 
-function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOptions = {}): string {
+function getCausalDashboardHtml(
+  graph: CausalGraphData,
+  mode: CausalDashboardMode = "free",
+  options: DashboardHtmlOptions = {}
+): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
+  const causalModeJson = JSON.stringify(mode).replace(/</g, "\\u003c");
   const dashboardColorsJson = JSON.stringify(DASHBOARD_COLOR_SCHEME).replace(/</g, "\\u003c");
   const includeSaveButton = options.includeSaveButton ?? true;
   const standaloneDarkMode = options.standaloneDarkMode ?? false;
@@ -5016,6 +5028,10 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       --dashboard-tooltip-fg: var(--vscode-editorHoverWidget-foreground, #f0f0f0);
       --dashboard-font-family: var(--vscode-font-family, "Segoe UI", "Noto Sans", Arial, sans-serif);`;
   const saveButtonHtml = includeSaveButton ? '<button id="save-dashboard" class="save-button" type="button">Save</button>' : "";
+  const modeToggleHtml = `<div class="mode-toggle" role="group" aria-label="Causal layout mode">
+    <button id="mode-free" class="mode-button" type="button">Free Layout</button>
+    <button id="mode-step" class="mode-button" type="button">Step Layout</button>
+  </div>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -5104,10 +5120,37 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
       font: inherit;
       cursor: pointer;
     }
+    .mode-toggle {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 120;
+      display: inline-flex;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid var(--dashboard-border);
+      background: var(--dashboard-widget-bg);
+      border-radius: 8px;
+    }
+    .mode-button {
+      border: 1px solid var(--dashboard-border);
+      background: transparent;
+      color: var(--dashboard-fg);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .mode-button.active {
+      background: rgba(120, 170, 220, 0.25);
+      border-color: rgba(120, 170, 220, 0.75);
+    }
   </style>
 </head>
 <body>
   ${saveButtonHtml}
+  ${modeToggleHtml}
   <div class="root">
     <svg id="graph"></svg>
   </div>
@@ -5116,12 +5159,33 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script>
     const graph = ${graphJson};
+    const initialCausalMode = ${causalModeJson};
     const dashboardColors = ${dashboardColorsJson};
     const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : undefined;
     const svg = d3.select('#graph');
     const tooltip = document.getElementById('tooltip');
     const legend = document.getElementById('legend');
     const saveButton = document.getElementById('save-dashboard');
+    const modeFreeButton = document.getElementById('mode-free');
+    const modeStepButton = document.getElementById('mode-step');
+    let currentCausalMode = initialCausalMode;
+
+    function isCausalMode(value) {
+      return value === 'free' || value === 'step';
+    }
+
+    function isStepLayoutMode() {
+      return currentCausalMode === 'step';
+    }
+
+    function updateModeButtons() {
+      if (modeFreeButton) {
+        modeFreeButton.classList.toggle('active', currentCausalMode === 'free');
+      }
+      if (modeStepButton) {
+        modeStepButton.classList.toggle('active', currentCausalMode === 'step');
+      }
+    }
     if (saveButton && vscodeApi) {
       saveButton.addEventListener('click', () => {
         vscodeApi.postMessage({ type: 'saveDashboard' });
@@ -5130,6 +5194,23 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
     if (saveButton && !vscodeApi) {
       saveButton.style.display = 'none';
     }
+    if (modeFreeButton) {
+      modeFreeButton.addEventListener('click', () => {
+        switchCausalMode('free');
+      });
+    }
+    if (modeStepButton) {
+      modeStepButton.addEventListener('click', () => {
+        switchCausalMode('step');
+      });
+    }
+    window.addEventListener('message', (event) => {
+      const message = event.data;
+      if (!message || message.type !== 'setCausalMode' || !isCausalMode(message.mode)) {
+        return;
+      }
+      switchCausalMode(message.mode, true);
+    });
 
     let width = 0;
     let height = 0;
@@ -5147,6 +5228,41 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
         linkIdByNodeId.get(targetId).incoming.push(linkDatum);
       }
     }
+    const minimumStepDy = 48;
+    const stepRankByNodeId = new Map();
+    let minStepRank = 0;
+    let maxStepRank = 0;
+    let currentStepDy = minimumStepDy;
+
+    function resolveStepRank(nodeId, visiting = new Set()) {
+      if (stepRankByNodeId.has(nodeId)) {
+        return stepRankByNodeId.get(nodeId);
+      }
+      if (visiting.has(nodeId)) {
+        return 0;
+      }
+      visiting.add(nodeId);
+      const nodeLinks = linkIdByNodeId.get(nodeId) || { incoming: [], outgoing: [] };
+      let rank = 0;
+      if (nodeLinks.outgoing.length > 0) {
+        let highestValidRank = Number.POSITIVE_INFINITY;
+        for (const outgoingLink of nodeLinks.outgoing) {
+          const targetId = linkEndId(outgoingLink.target);
+          highestValidRank = Math.min(highestValidRank, resolveStepRank(targetId, visiting) - 1);
+        }
+        rank = Number.isFinite(highestValidRank) ? highestValidRank : 0;
+      }
+      visiting.delete(nodeId);
+      stepRankByNodeId.set(nodeId, rank);
+      return rank;
+    }
+
+    for (const nodeDatum of graph.nodes) {
+      const rank = resolveStepRank(nodeDatum.id);
+      minStepRank = Math.min(minStepRank, rank);
+      maxStepRank = Math.max(maxStepRank, rank);
+    }
+
     const defaultLinkOpacity = 0.7;
     const defaultLinkWidth = 1.6;
     const dimmedLinkOpacity = 0.14;
@@ -5172,6 +5288,29 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
+    }
+
+    function updateStepTargets() {
+      const maxRows = Math.max(1, maxStepRank - minStepRank + 2);
+      const availableHeight = Math.max(140, height - 40);
+      const computedDy = Math.floor(availableHeight / maxRows);
+      currentStepDy = Math.max(minimumStepDy, computedDy);
+      for (const nodeDatum of graph.nodes) {
+        const normalizedRank = (stepRankByNodeId.get(nodeDatum.id) || 0) - minStepRank;
+        nodeDatum.targetY = (normalizedRank + 1) * currentStepDy;
+        if (!Number.isFinite(nodeDatum.x)) {
+          nodeDatum.x = width / 2;
+        }
+        if (!Number.isFinite(nodeDatum.y)) {
+          nodeDatum.y = nodeDatum.targetY;
+        }
+      }
+    }
+
+    function setStepPinning() {
+      for (const nodeDatum of graph.nodes) {
+        nodeDatum.fy = isStepLayoutMode() ? nodeDatum.targetY : null;
+      }
     }
 
     function isFiniteNumber(value) {
@@ -5337,6 +5476,9 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
     }
 
     setSize();
+    updateModeButtons();
+    updateStepTargets();
+    setStepPinning();
     renderLegend();
 
     const markerId = 'causal-link-arrow';
@@ -5443,15 +5585,118 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
         });
     }
 
+    const linkForce = d3.forceLink(graph.links).id((d) => d.id);
+    const chargeForce = d3.forceManyBody();
+    const centerForce = d3.forceCenter(width / 2, height / 2);
+    const xForce = d3.forceX(width / 2);
+    const yForce = d3.forceY(height / 2);
+    const collisionForce = d3.forceCollide(nodeRadius + 7);
+    const rowMinSpacingPx = 280;
+    const rowAttractStrength = 0.22;
+    const causeEffectAttractStrength = 45;
+    function enforceMinRowSpacing(minSpacing) {
+      if (!isStepLayoutMode()) {
+        return;
+      }
+      const rowsByY = new Map();
+      for (const nodeDatum of graph.nodes) {
+        const key = nodeDatum.targetY;
+        if (!rowsByY.has(key)) {
+          rowsByY.set(key, []);
+        }
+        rowsByY.get(key).push(nodeDatum);
+      }
+      for (const rowNodes of rowsByY.values()) {
+        if (rowNodes.length < 2) {
+          continue;
+        }
+        const originalCenterX = rowNodes.reduce((sum, nodeDatum) => sum + (nodeDatum.x || 0), 0) / rowNodes.length;
+        rowNodes.sort((left, right) => (left.x || 0) - (right.x || 0));
+        let previousX = rowNodes[0].x || 0;
+        for (let indexA = 0; indexA < rowNodes.length; indexA += 1) {
+          if (indexA === 0) {
+            continue;
+          }
+          const nodeDatum = rowNodes[indexA];
+          const minX = previousX + minSpacing;
+          if ((nodeDatum.x || 0) < minX) {
+            nodeDatum.x = minX;
+          }
+          previousX = nodeDatum.x || 0;
+        }
+        const adjustedCenterX = rowNodes.reduce((sum, nodeDatum) => sum + (nodeDatum.x || 0), 0) / rowNodes.length;
+        const recenterDx = originalCenterX - adjustedCenterX;
+        for (const nodeDatum of rowNodes) {
+          nodeDatum.x = (nodeDatum.x || 0) + recenterDx;
+          nodeDatum.vx = (nodeDatum.vx || 0) * 0.5;
+        }
+      }
+    }
+    const sameRowAttractForce = (alpha) => {
+      if (!isStepLayoutMode()) {
+        return;
+      }
+      const rowsByY = new Map();
+      for (const nodeDatum of graph.nodes) {
+        const key = nodeDatum.targetY;
+        if (!rowsByY.has(key)) {
+          rowsByY.set(key, []);
+        }
+        rowsByY.get(key).push(nodeDatum);
+      }
+      for (const rowNodes of rowsByY.values()) {
+        if (rowNodes.length < 2) {
+          continue;
+        }
+        rowNodes.sort((left, right) => (left.x || 0) - (right.x || 0));
+        for (let index = 0; index < rowNodes.length - 1; index += 1) {
+          const leftNode = rowNodes[index];
+          const rightNode = rowNodes[index + 1];
+          const dx = (rightNode.x || 0) - (leftNode.x || 0);
+          if (!Number.isFinite(dx) || Math.abs(dx) < 0.001) {
+            continue;
+          }
+          const pullX = Math.sign(dx) * alpha * rowAttractStrength;
+          leftNode.vx = (leftNode.vx || 0) + pullX;
+          rightNode.vx = (rightNode.vx || 0) - pullX;
+        }
+      }
+    };
+    const causeEffectAttractForce = (alpha) => {
+      if (!isStepLayoutMode()) {
+        return;
+      }
+      const desiredHorizontalGap = Math.max(36, currentStepDy * 0.45);
+      for (const linkDatum of graph.links) {
+        const sourceNode = nodeById.get(linkEndId(linkDatum.source));
+        const targetNode = nodeById.get(linkEndId(linkDatum.target));
+        if (!sourceNode || !targetNode) {
+          continue;
+        }
+        const dx = (targetNode.x || 0) - (sourceNode.x || 0);
+        const absDx = Math.abs(dx);
+        if (absDx <= desiredHorizontalGap) {
+          continue;
+        }
+        const excessRatio = Math.min(2.5, (absDx - desiredHorizontalGap) / desiredHorizontalGap);
+        const pullX = Math.sign(dx) * excessRatio * alpha * causeEffectAttractStrength;
+        sourceNode.vx = (sourceNode.vx || 0) + pullX;
+        targetNode.vx = (targetNode.vx || 0) - pullX;
+      }
+    };
     const simulation = d3.forceSimulation(graph.nodes)
       .alphaDecay(0.0023)
-      .force('link', d3.forceLink(graph.links).id((d) => d.id).distance(96).strength(0.4))
-      .force('charge', d3.forceManyBody().strength(-185))
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('x', d3.forceX(width / 2).strength(0.018))
-      .force('y', d3.forceY(height / 2).strength(0.018))
-      .force('collision', d3.forceCollide(nodeRadius + 7))
+      .force('link', linkForce)
+      .force('charge', chargeForce)
+      .force('center', centerForce)
+      .force('x', xForce)
+      .force('y', yForce)
+      .force('rowAttract', sameRowAttractForce)
+      .force('causeEffectAttract', causeEffectAttractForce)
+      .force('collision', collisionForce)
       .on('tick', () => {
+        enforceMinRowSpacing(rowMinSpacingPx);
+
         link
           .attr('x1', (d) => trimDirectedLink(d).x1)
           .attr('y1', (d) => trimDirectedLink(d).y1)
@@ -5467,11 +5712,53 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
           .attr('y', (d) => d.y);
       });
 
+    function configureForCurrentMode() {
+      if (isStepLayoutMode()) {
+        updateStepTargets();
+        setStepPinning();
+        linkForce.distance(Math.max(34, currentStepDy * 0.8)).strength(0);
+        chargeForce.strength(0);
+        simulation.force('center', null);
+        xForce.x(width / 2).strength(0);
+        yForce.y((d) => d.targetY).strength(0);
+        collisionForce.strength(0);
+      } else {
+        setStepPinning();
+        linkForce.distance(96).strength(0.4);
+        chargeForce.strength(-185);
+        simulation.force('center', centerForce);
+        xForce.x(width / 2).strength(0.018);
+        yForce.y(height / 2).strength(0.018);
+        collisionForce.strength(1);
+      }
+    }
+
+    function switchCausalMode(nextMode, animate = true) {
+      if (!isCausalMode(nextMode) || nextMode === currentCausalMode) {
+        return;
+      }
+      currentCausalMode = nextMode;
+      for (const nodeDatum of graph.nodes) {
+        nodeDatum.fx = null;
+      }
+      updateModeButtons();
+      configureForCurrentMode();
+      simulation.alpha(animate ? 0.82 : 0.48).restart();
+      hideTooltip();
+      resetCausalLinkHighlight();
+      if (vscodeApi) {
+        vscodeApi.postMessage({ type: 'causalModeChanged', mode: currentCausalMode });
+      }
+    }
+
+    configureForCurrentMode();
+
     window.addEventListener('resize', () => {
       setSize();
-      simulation.force('center', d3.forceCenter(width / 2, height / 2));
-      simulation.force('x', d3.forceX(width / 2).strength(0.018));
-      simulation.force('y', d3.forceY(height / 2).strength(0.018));
+      updateStepTargets();
+      setStepPinning();
+      centerForce.x(width / 2).y(height / 2);
+      configureForCurrentMode();
       simulation.alpha(0.35).restart();
       hideTooltip();
       resetCausalLinkHighlight();
@@ -5484,13 +5771,13 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
         highlightCausalLinksForNode(d.id);
         if (!event.active) simulation.alphaTarget(0.3).restart();
         d.fx = d.x;
-        d.fy = d.y;
+        d.fy = isStepLayoutMode() ? d.targetY : d.y;
       })
       .on('drag', (event, d) => {
         hideTooltip();
         highlightCausalLinksForNode(d.id);
         d.fx = event.x;
-        d.fy = event.y;
+        d.fy = isStepLayoutMode() ? d.targetY : event.y;
       })
       .on('end', (event, d) => {
         dragging = false;
@@ -5498,7 +5785,7 @@ function getCausalDashboardHtml(graph: CausalGraphData, options: DashboardHtmlOp
         resetCausalLinkHighlight();
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
-        d.fy = null;
+        d.fy = isStepLayoutMode() ? d.targetY : null;
       });
 
     node.call(drag);
@@ -6247,6 +6534,7 @@ class BurbageSidebarProvider implements vscode.WebviewViewProvider {
 type SendPromptMessage = { type: "sendPrompt"; text: string };
 type SyncMessage = { type: "sync" };
 type SaveDashboardMessage = { type: "saveDashboard" };
+type CausalModeMessage = { type: "setCausalMode" | "causalModeChanged"; mode: CausalDashboardMode };
 type TimelineModeMessage = { type: "setTimelineMode" | "timelineModeChanged"; mode: TimelineDashboardMode };
 type VonnegutModeMessage = { type: "setVonnegutMode" | "vonnegutModeChanged"; mode: VonnegutDashboardMode };
 
@@ -6278,6 +6566,14 @@ function isTimelineModeChangedMessage(value: unknown): value is TimelineModeMess
   }
   const maybe = value as { type?: unknown; mode?: unknown };
   return maybe.type === "timelineModeChanged" && (maybe.mode === "event" || maybe.mode === "document");
+}
+
+function isCausalModeChangedMessage(value: unknown): value is CausalModeMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const maybe = value as { type?: unknown; mode?: unknown };
+  return maybe.type === "causalModeChanged" && (maybe.mode === "free" || maybe.mode === "step");
 }
 
 function isVonnegutModeChangedMessage(value: unknown): value is VonnegutModeMessage {
